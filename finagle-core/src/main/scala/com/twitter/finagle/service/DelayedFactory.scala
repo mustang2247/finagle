@@ -32,18 +32,21 @@ class DelayedFactory[Req, Rep](
     f: Future[ServiceFactory[Req, Rep]]
   ): Future[ServiceFactory[Req, Rep]] = {
     val p = Promise.attached(f)
-    p setInterruptHandler { case t: Throwable =>
-      if (p.detach()) {
-        q.remove(p)
-        p.setException(Failure.InterruptedBy(t))
-      }
+    p setInterruptHandler {
+      case t: Throwable =>
+        if (p.detach()) {
+          q.remove(p)
+          p.setException(Failure.adapt(t, Failure.Interrupted))
+        }
     }
     q.add(p)
     p
   }
 
   def apply(conn: ClientConnection): Future[Service[Req, Rep]] =
-    wrapped flatMap { fac => fac(conn) }
+    wrapped flatMap { fac =>
+      fac(conn)
+    }
 
   override def close(deadline: Time): Future[Unit] = {
     if (underlyingF.isDefined) wrapped flatMap { svc =>
@@ -60,9 +63,11 @@ class DelayedFactory[Req, Rep](
 
   override def status: Status =
     if (underlyingF.isDefined) Await.result(underlyingF).status
-    else Status.Busy(underlyingF.unit)
+    else Status.Busy
 
   private[finagle] def numWaiters(): Int = q.size()
+
+  override def toString: String = s"DelayedFactory(waiters=${numWaiters()})"
 }
 
 object DelayedFactory {

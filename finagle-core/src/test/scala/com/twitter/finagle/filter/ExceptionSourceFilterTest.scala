@@ -15,13 +15,13 @@ import org.scalatest.mock.MockitoSugar
 class ExceptionSourceFilterTest extends FunSuite with MockitoSugar {
   test("ExceptionSourceFilter should add a name to sourced exceptions") {
     val service = mock[Service[Int, Int]]
-    val e = new SourcedException{}
+    val e = new SourcedException {}
     when(service(anyInt)).thenReturn(Future.exception(e))
     val composed = new ExceptionSourceFilter("name") andThen service
     val actual = intercept[SourcedException] {
       Await.result(composed(0))
     }
-    assert(actual.serviceName === "name")
+    assert(actual.serviceName == "name")
   }
 
   test("ExceptionSourceFilter should add a name to failures") {
@@ -32,6 +32,6 @@ class ExceptionSourceFilterTest extends FunSuite with MockitoSugar {
     val actual = intercept[Failure] {
       Await.result(composed(0))
     }
-    assert(actual.getSource(Failure.Sources.ServiceName) === Some("name"))
+    assert(actual.getSource(Failure.Source.Service) == Some("name"))
   }
 }

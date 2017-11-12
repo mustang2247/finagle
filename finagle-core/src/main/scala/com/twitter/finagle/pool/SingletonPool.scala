@@ -1,24 +1,23 @@
 package com.twitter.finagle.pool
 
 import com.twitter.finagle._
-import com.twitter.finagle.service.FailedService
-import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
+import com.twitter.finagle.client.StackClient
+import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.util.{Future, Return, Throw, Time, Promise}
 import java.util.concurrent.atomic.{AtomicReference, AtomicInteger}
 import scala.annotation.tailrec
-import scala.collection.immutable
 
 private[finagle] object SingletonPool {
-  val role = Stack.Role("SingletonPool")
+  val role: Stack.Role = StackClient.Role.pool
 
   /**
    * Creates a [[com.twitter.finagle.Stackable]] [[com.twitter.finagle.pool.SingletonPool]].
    */
   def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
     new Stack.Module1[param.Stats, ServiceFactory[Req, Rep]] {
-      val role = SingletonPool.role
+      val role: Stack.Role = SingletonPool.role
       val description = "Maintain at most one connection"
-      def make(_stats: param.Stats, next: ServiceFactory[Req, Rep]) = {
+      def make(_stats: param.Stats, next: ServiceFactory[Req, Rep]): ServiceFactory[Req, Rep] = {
         val param.Stats(sr) = _stats
         new SingletonPool(next, sr.scope("singletonpool"))
       }
@@ -50,7 +49,7 @@ private[finagle] object SingletonPool {
         case n if n < 0 =>
           // This is technically an API usage error.
           count.incrementAndGet()
-          Future.exception(Failure.Cause(new ServiceClosedException))
+          Future.exception(Failure(new ServiceClosedException))
         case _ =>
           Future.Done
       }
@@ -69,10 +68,8 @@ private[finagle] object SingletonPool {
  * service. A new Service is established whenever the service factory
  * fails or the current service has become unavailable.
  */
-class SingletonPool[Req, Rep](
-  underlying: ServiceFactory[Req, Rep],
-  statsReceiver: StatsReceiver)
-extends ServiceFactory[Req, Rep] {
+class SingletonPool[Req, Rep](underlying: ServiceFactory[Req, Rep], statsReceiver: StatsReceiver)
+    extends ServiceFactory[Req, Rep] {
   import SingletonPool._
 
   private[this] val scoped = statsReceiver.scope("connects")
@@ -89,7 +86,7 @@ extends ServiceFactory[Req, Rep] {
    */
   private[this] def connect(done: Promise[Unit], conn: ClientConnection) {
     def complete(newState: State[Req, Rep]) = state.get match {
-      case s@Awaiting(d) if d == done => state.compareAndSet(s, newState)
+      case s @ Awaiting(d) if d == done => state.compareAndSet(s, newState)
       case Idle | Closed | Awaiting(_) | Open(_) => false
     }
 
@@ -109,8 +106,9 @@ extends ServiceFactory[Req, Rep] {
         complete(Idle)
         svc.close()
         Future.exception(
-          Failure.Cause("Returned unavailable service")
-            .withSource("Role", SingletonPool.role))
+          Failure("Returned unavailable service", Failure.Restartable)
+            .withSource(Failure.Source.Role, SingletonPool.role)
+        )
 
       case Return(svc) =>
         if (!complete(Open(new RefcountedService(svc))))
@@ -134,7 +132,7 @@ extends ServiceFactory[Req, Rep] {
       // with it.
       svc.open()
 
-    case s@Open(svc) => // service died; try to reconnect.
+    case s @ Open(svc) => // service died; try to reconnect.
       if (state.compareAndSet(s, Idle))
         svc.close()
       apply(conn)
@@ -152,18 +150,32 @@ extends ServiceFactory[Req, Rep] {
       awaitApply(done, conn)
 
     case Closed =>
-      Future.exception(Failure.Cause(new ServiceClosedException))
+      Future.exception(Failure(new ServiceClosedException))
   }
 
   /**
    * @inheritdoc
    *
-   * A SingletonPool is available when it is not closed and the underlying
-   * factory is also available.
+   * The status of a [[SingletonPool]] is the worse of the
+   * the underlying status and the status of the currently
+   * cached service, if any.
    */
-  override def status: Status = 
-    if (state.get != Closed) underlying.status
-    else Status.Closed
+  override def status: Status =
+    state.get match {
+      case Closed => Status.Closed
+      case Open(svc) =>
+        // We don't account for closed services as these will
+        // be reestablished on the next request.
+        svc.status match {
+          case Status.Closed => underlying.status
+          case status => Status.worst(status, underlying.status)
+        }
+      case Idle | Awaiting(_) =>
+        // This could also be Status.worst(underlying.status, Status.Busy(p));
+        // in practice this probably won't make much of a difference, though,
+        // since pending requests are anyway queued.
+        underlying.status
+    }
 
   /**
    * @inheritdoc
@@ -175,22 +187,23 @@ extends ServiceFactory[Req, Rep] {
     closeService(deadline) before underlying.close(deadline)
 
   @tailrec
-  private[this] def closeService(deadline: Time): Future[Unit] = 
+  private[this] def closeService(deadline: Time): Future[Unit] =
     state.get match {
-      case s@Idle =>
-        if (!state.compareAndSet(s, Closed)) closeService(deadline)
+      case Idle =>
+        if (!state.compareAndSet(Idle, Closed)) closeService(deadline)
         else Future.Done
-  
-      case s@Open(svc) =>
+
+      case s @ Open(svc) =>
         if (!state.compareAndSet(s, Closed)) closeService(deadline)
         else svc.close(deadline)
-  
-      case s@Awaiting(done) =>
-        if (!state.compareAndSet(s, Closed)) closeService(deadline) else {
+
+      case s @ Awaiting(done) =>
+        if (!state.compareAndSet(s, Closed)) closeService(deadline)
+        else {
           done.raise(new ServiceClosedException)
           Future.Done
         }
-  
+
       case Closed =>
         Future.Done
     }

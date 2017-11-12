@@ -1,7 +1,7 @@
-package com.twitter.finagle.exp.mysql.integration
+package com.twitter.finagle.mysql.integration
 
-import com.twitter.finagle.exp.Mysql
-import com.twitter.finagle.exp.mysql._
+import com.twitter.finagle.Mysql
+import com.twitter.finagle.mysql._
 import com.twitter.util.Await
 import java.sql.Date
 import org.junit.runner.RunWith
@@ -35,10 +35,28 @@ object SwimmingRecord {
   val allRecords = List[SwimmingRecord](
     SwimmingRecord("50 m freestyle", 20.91F, "Cesar Cielo", "Brazil", Date.valueOf("2009-12-18")),
     SwimmingRecord("100 m freestyle", 46.91F, "Cesar Cielo", "Brazil", Date.valueOf("2009-08-02")),
-    SwimmingRecord("50 m backstroke", 24.04F, "Liam Tancock", "Great Britain", Date.valueOf("2009-08-02")),
-    SwimmingRecord("100 m backstroke", 51.94F, "Aaron Peirsol", "United States", Date.valueOf("2009-07-08")),
+    SwimmingRecord(
+      "50 m backstroke",
+      24.04F,
+      "Liam Tancock",
+      "Great Britain",
+      Date.valueOf("2009-08-02")
+    ),
+    SwimmingRecord(
+      "100 m backstroke",
+      51.94F,
+      "Aaron Peirsol",
+      "United States",
+      Date.valueOf("2009-07-08")
+    ),
     SwimmingRecord("50 m butterfly", 22.43F, "Rafael Munoz", "Spain", Date.valueOf("2009-05-05")),
-    SwimmingRecord("100 m butterfly", 49.82F, "Michael Phelps", "United States", Date.valueOf("2009-07-29"))
+    SwimmingRecord(
+      "100 m butterfly",
+      49.82F,
+      "Michael Phelps",
+      "United States",
+      Date.valueOf("2009-07-29")
+    )
   )
 }
 
@@ -73,7 +91,7 @@ class ClientTest extends FunSuite with IntegrationClient {
       val insertResult = Await.result(c.query(sql))
       val OK(_, insertid, _, _, _) = insertResult.asInstanceOf[OK]
       assert(insertResult.isInstanceOf[OK])
-      assert(insertid === 1)
+      assert(insertid == 1)
     }
 
     test("query: select values") {
@@ -88,23 +106,43 @@ class ClientTest extends FunSuite with IntegrationClient {
 
       var i = 0
       for (res <- selectResult) {
-        assert(allRecords(i) === res)
+        assert(allRecords(i) == res)
         i += 1
       }
     }
 
     test("prepared statement") {
-      val prepareQuery = "SELECT COUNT(*) AS 'numRecords' FROM `finagle-mysql-test` WHERE `name` LIKE ?"
+      val prepareQuery =
+        "SELECT COUNT(*) AS 'numRecords' FROM `finagle-mysql-test` WHERE `name` LIKE ?"
       def extractRow(r: Result) = r.asInstanceOf[ResultSet].rows(0)
       val ps = c.prepare(prepareQuery)
       for (i <- 0 to 10) {
-        val randomIdx = math.floor(math.random * (allRecords.size-1)).toInt
+        val randomIdx = math.floor(math.random * (allRecords.size - 1)).toInt
         val recordName = allRecords(randomIdx).name
         val expectedRes = LongValue(allRecords.filter(_.name == recordName).size)
         val res = ps.select(recordName)(identity)
         val row = Await.result(res)(0)
-        assert(row("numRecords").get === expectedRes)
+        assert(row("numRecords").get == expectedRes)
       }
+    }
+
+    test("cursored statement") {
+      val query = "select * from `finagle-mysql-test` where `event` = ?"
+      val cursoredStatement = c.cursor(query)
+      val cursorResult = Await.result(cursoredStatement(1, "50 m freestyle")(r => r))
+      val rows = Await.result(cursorResult.stream.toSeq())
+
+      assert(rows.size == 1)
+      assert(rows(0)("event").get == StringValue("50 m freestyle"))
+    }
+
+    test("CursorResult does not store head of stream") {
+      val query = "select * from `finagle-mysql-test`"
+      val cursoredStatement = c.cursor(query)
+      val cursorResult = Await.result(cursoredStatement(1)(r => r))
+      val first = cursorResult.stream.take(1)
+      val second = cursorResult.stream.take(1)
+      assert(first != second)
     }
   }
 }

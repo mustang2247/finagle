@@ -1,5 +1,6 @@
 package com.twitter.finagle.thrift
 
+import com.twitter.conversions.time._
 import com.twitter.finagle.{Status, Service, WriteException}
 import com.twitter.util.{Await, Future, Promise, Return, Throw}
 import org.apache.thrift.TApplicationException
@@ -14,7 +15,7 @@ import org.scalatest.mock.MockitoSugar
 @RunWith(classOf[JUnitRunner])
 class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
 
-  case class ValidateThriftServiceContext(p: Promise[Array[Byte]] = new Promise[Array[Byte]]){
+  case class ValidateThriftServiceContext(p: Promise[Array[Byte]] = new Promise[Array[Byte]]) {
     def newValidate() = new ValidateThriftService(service, protocolFactory)
 
     lazy val service: Service[ThriftClientRequest, Array[Byte]] = {
@@ -48,7 +49,7 @@ class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
     buf().writeMessageBegin(new TMessage("ok123", TMessageType.REPLY, 0))
     buf().writeMessageEnd()
     val res = validate(req)
-    assert(res.isDefined === false)
+    assert(res.isDefined == false)
     verify(service).apply(req)
     p.setValue(buf.toArray)
     assert(res.isDefined)
@@ -64,7 +65,8 @@ class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
       TApplicationException.INVALID_MESSAGE_TYPE,
       TApplicationException.MISSING_RESULT,
       TApplicationException.UNKNOWN,
-      TApplicationException.WRONG_METHOD_NAME)
+      TApplicationException.WRONG_METHOD_NAME
+    )
 
     for (typ <- codes) {
       val buf = new OutputBuffer(protocolFactory)
@@ -78,7 +80,7 @@ class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
       assert(validate.isAvailable)
       val f = validate(req)
       assert(f.isDefined)
-      assert(Await.result(f) === arr)
+      assert(Await.result(f, 10.seconds) == arr)
       assert(!validate.isAvailable)
       val resp = validate(req).poll
 
@@ -95,8 +97,7 @@ class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
     val c = ValidateThriftServiceContext()
     import c._
 
-    val codes = Seq(TApplicationException.INTERNAL_ERROR,
-      TApplicationException.UNKNOWN_METHOD)
+    val codes = Seq(TApplicationException.INTERNAL_ERROR, TApplicationException.UNKNOWN_METHOD)
 
     for (typ <- codes) {
       val buf = new OutputBuffer(protocolFactory)
@@ -110,7 +111,7 @@ class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
       assert(validate.isAvailable)
       val f = validate(req)
       assert(f.isDefined)
-      assert(Await.result(f) === arr)
+      assert(Await.result(f, 10.seconds) == arr)
       assert(validate.isAvailable)
       assert(validate(req).poll match {
         case Some(Return(_)) => true

@@ -17,10 +17,11 @@ import com.twitter.util.Duration
  * lease information, and lets the lessor query the lessee for draining info.
  */
 private[finagle] trait Lessee {
+
   /**
    * The Lessee is given the lease for d, starting now.
    */
-  def issue(d: Duration)
+  def issue(d: Duration): Unit
 
   /**
    * The number of pending requests.  Useful for draining.
@@ -37,23 +38,23 @@ private[finagle] trait Lessor {
    * The lessor will notify all lessees that have been registered and have not
    * yet been unregistered when they have the lease.
    */
-  def register(lessee: Lessee)
+  def register(lessee: Lessee): Unit
 
   /**
    * After a lessee has been unregistered, it will no longer be notified that it
    * has the lease.
    */
-  def unregister(lessee: Lessee)
+  def unregister(lessee: Lessee): Unit
 
   /**
    * Lessees should call observe when they know the duration of their request.
    */
-  def observe(d: Duration)
+  def observe(d: Duration): Unit
 
   /**
    * Lessees should call observeArrival when a request arrives.
    */
-  def observeArrival()
+  def observeArrival(): Unit
 }
 
 private[finagle] object Lessor {
@@ -63,9 +64,9 @@ private[finagle] object Lessor {
   }
 
   val nil: Lessor = new Lessor {
-    def register(lessee: Lessee) = ()
-    def unregister(lessee: Lessee) = ()
-    def observe(d: Duration) = ()
-    def observeArrival() = ()
+    def register(lessee: Lessee): Unit = ()
+    def unregister(lessee: Lessee): Unit = ()
+    def observe(d: Duration): Unit = ()
+    def observeArrival(): Unit = ()
   }
 }

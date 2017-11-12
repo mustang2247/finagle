@@ -1,6 +1,6 @@
 package com.twitter.finagle.server
 
-import com.twitter.finagle.transport.Transport
+import com.twitter.finagle.transport.{Transport, TransportContext}
 import com.twitter.finagle.{ListeningServer, NullServer, Stack}
 import java.net.SocketAddress
 
@@ -13,15 +13,23 @@ import java.net.SocketAddress
  * The returned `ListeningServer` is used to inspect the server, and
  * is also used to shut it down.
  */
-trait Listener[In, Out] {
-  def listen(addr: SocketAddress)(serveTransport: Transport[In, Out] => Unit): ListeningServer
+trait Listener[In, Out, Ctx <: TransportContext] {
+  def listen(
+    addr: SocketAddress
+  )(serveTransport: Transport[In, Out] {
+    type Context <: Ctx
+  } => Unit): ListeningServer
 }
 
 /**
  * An empty Listener that can be used as a placeholder.
  */
-object NullListener extends Listener[Any, Any] {
-  def listen(addr: SocketAddress)(serveTransport: Transport[Any, Any] => Unit) = NullServer
+object NullListener extends Listener[Any, Any, TransportContext] {
+  def listen(
+    addr: SocketAddress
+  )(serveTransport: Transport[Any, Any] {
+    type Context <: TransportContext
+  } => Unit) = NullServer
 }
 
 /**
@@ -29,6 +37,7 @@ object NullListener extends Listener[Any, Any] {
  * a [[com.twitter.finagle.server.Listener]].
  */
 object Listener {
+
   /**
    * A [[com.twitter.finagle.Stack.Param]] used to configure
    * the `Listener` backlog.
@@ -36,8 +45,26 @@ object Listener {
    * @param value An option indicating the backlog size. If None,
    * the implementation default is used.
    */
-  case class Backlog(value: Option[Int])
-  implicit object Backlog extends Stack.Param[Backlog] {
-    val default = Backlog(None)
+  case class Backlog(value: Option[Int]) {
+    def mk(): (Backlog, Stack.Param[Backlog]) =
+      (this, Backlog.param)
+  }
+  object Backlog {
+    implicit val param = Stack.Param(Backlog(None))
+  }
+
+  /**
+   * Configures the traffic class to be used servers.
+   *
+   * @param value `None` indicates no class specified. When `Some`, is an opaque
+   * identifier and its meaning and interpretation are implementation specific.
+   * Currently used to configure [[java.net.StandardSocketOptions.IP_TOS]].
+   */
+  case class TrafficClass(value: Option[Int]) {
+    def mk(): (TrafficClass, Stack.Param[TrafficClass]) =
+      (this, TrafficClass.param)
+  }
+  object TrafficClass {
+    implicit val param = Stack.Param(TrafficClass(None))
   }
 }

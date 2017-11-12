@@ -1,0 +1,24 @@
+scala_library(
+  provides = scala_artifact(
+    org = 'com.twitter',
+    name = 'finagle-http2',
+    repo = artifactory,
+  ),
+  dependencies=[
+    '3rdparty/jvm/io/netty:netty',
+    '3rdparty/jvm/io/netty:netty4',
+    '3rdparty/jvm/io/netty:netty4-codec',
+    '3rdparty/jvm/io/netty:netty4-handler-proxy',
+    '3rdparty/jvm/io/netty:netty4-http',
+    '3rdparty/jvm/io/netty:netty4-http2',
+    'finagle/finagle-base-http',
+    'finagle/finagle-core',
+    'finagle/finagle-netty4',
+    'finagle/finagle-netty4-http',
+    'util/util-core',
+    'util/util-logging',
+    'util/util-stats',
+  ],
+  fatal_warnings=True,
+  sources=rglobs('*.scala'),
+)

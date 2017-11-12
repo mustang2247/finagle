@@ -1,14 +1,28 @@
-scala_library(name='scala',
+scala_library(
   provides = scala_artifact(
     org = 'com.twitter',
     name = 'finagle-mux',
     repo = artifactory,
   ),
   dependencies=[
-    '3rdparty:netty',
+    '3rdparty/jvm/io/netty',
+    '3rdparty/jvm/io/netty:netty4',
+    '3rdparty/jvm/io/netty:netty4-handler-proxy',
+    '3rdparty/jvm/io/netty:netty4-http',
     'finagle/finagle-core',
-    '3rdparty/jvm/com/twitter/common:stats-util',
-    'util/util-core',
+    'finagle/finagle-exp',
+    'finagle/finagle-mux/src/main/resources',
+    'finagle/finagle-netty4',
+    'finagle/finagle-toggle',
+    'util/util-app/src/main/scala:scala',
+    'util/util-core/src/main/scala:scala',
+    'util/util-logging/src/main/scala:scala',
+    'util/util-stats/src/main/scala:scala',
   ],
+  fatal_warnings=True,
   sources=rglobs('*.scala'),
+  exports=[
+    '3rdparty/jvm/io/netty:netty4',
+  ]
+
 )

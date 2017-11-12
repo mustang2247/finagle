@@ -1,48 +1,125 @@
 package com.twitter.finagle
 
+import com.twitter.concurrent.Once
 import com.twitter.finagle.exp.FinagleScheduler
-import com.twitter.finagle.util.DefaultLogger
-import com.twitter.util.NonFatal
-import java.util.Properties
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import com.twitter.finagle.loadbalancer.aperture
+import com.twitter.finagle.loadbalancer.aperture.ProcessCoordinate.FromInstanceId
+import com.twitter.finagle.stats.{DefaultStatsReceiver, FinagleStatsReceiver}
+import com.twitter.finagle.util.{DefaultLogger, LoadService}
+import com.twitter.jvm.JvmStats
+import com.twitter.util.FuturePool
+import java.util.concurrent.atomic.AtomicReference
 import java.util.logging.Level
+import java.util.Properties
+import scala.util.control.NonFatal
 
 /**
  * Global initialization of Finagle.
  */
 private[twitter] object Init {
-  private val inited = new AtomicBoolean(false)
   private val log = DefaultLogger
 
   // Used to record Finagle versioning in trace info.
   private val unknownVersion = "?"
   private val _finagleVersion = new AtomicReference[String](unknownVersion)
-  def finagleVersion = _finagleVersion.get
+  private val _finagleBuildRevision = new AtomicReference[String](unknownVersion)
 
-  def apply() {
-    if (!inited.compareAndSet(false, true))
-      return
+  private[this] val gauges = {
+    // because unboundedPool and interruptibleUnboundedPool share a common
+    // `ExecutorService`, these metrics apply to both of the FuturePools.
+    val pool = FuturePool.unboundedPool
+    val fpoolStats = FinagleStatsReceiver.scope("future_pool")
+    val apertureStats = FinagleStatsReceiver.scope("aperture")
+    Seq(
+      fpoolStats.addGauge("pool_size") { pool.poolSize },
+      fpoolStats.addGauge("active_tasks") { pool.numActiveTasks },
+      fpoolStats.addGauge("completed_tasks") { pool.numCompletedTasks },
+      apertureStats.addGauge("coordinate") {
+        aperture.ProcessCoordinate() match {
+          case Some(coord) => coord.offset.toFloat
+          // We know the coordinate's range is [0, 1.0), so anything outside
+          // of this can be used to signify empty.
+          case None => -1f
+        }
+      },
+      apertureStats.addGauge("peerset_size") {
+        aperture.ProcessCoordinate() match {
+          case Some(FromInstanceId(_, _, size)) => size.toFloat
+          case _ => -1f
+        }
+      }
+    )
+  }
+
+  JvmStats.register(DefaultStatsReceiver)
+
+  def finagleVersion: String = _finagleVersion.get
+
+  def finagleBuildRevision: String = _finagleBuildRevision.get
+
+  private def tryProps(path: String): Option[Properties] = {
+    try {
+      val resourceOpt = Option(getClass.getResourceAsStream(path))
+      resourceOpt match {
+        case None =>
+          log.log(Level.FINER, s"Finagle's build.properties not found: $path")
+          None
+        case Some(resource) =>
+          try {
+            val p = new Properties
+            p.load(resource)
+            Some(p)
+          } finally {
+            resource.close()
+          }
+      }
+    } catch {
+      case NonFatal(exc) =>
+        log.log(Level.WARNING, s"Exception while loading Finagle's build.properties: $path", exc)
+        None
+    }
+  }
+
+  // package protected for testing
+  private[finagle] def loadBuildProperties: Option[Properties] = {
+    val candidates = Seq(
+      "finagle-core",
+      "finagle-core_2.11",
+      "finagle-core_2.12"
+    )
+    candidates.flatMap { c =>
+      tryProps(s"/com/twitter/$c/build.properties")
+    }.headOption
+  }
+
+  private[this] val once = Once {
+    LoadService[FinagleInit]().foreach { init =>
+      try {
+        init()
+      } catch {
+        case NonFatal(nf) =>
+          log.log(Level.WARNING, s"error running ${init.label}", nf)
+      }
+    }
 
     FinagleScheduler.init()
 
-    val p = new Properties
-    try {
-      val resource = getClass.getResource("/com/twitter/finagle-core/build.properties")
-      if (resource == null)
-        log.log(Level.WARNING, "Finagle's build.properties not found")
-      else
-        p.load(resource.openStream())
-    } catch {
-      case NonFatal(exc) =>
-        log.log(Level.WARNING, "Exception while loading finagle's build.properties", exc)
-    }
+    val p = loadBuildProperties.getOrElse { new Properties() }
 
     _finagleVersion.set(p.getProperty("version", unknownVersion))
+    _finagleBuildRevision.set(p.getProperty("build_revision", unknownVersion))
 
-    log.info("Finagle version %s (rev=%s) built at %s".format(
-      finagleVersion,
-      p.getProperty("build_revision", "?"),
-      p.getProperty("build_name", "?")
-    ))
+    log.info(
+      "Finagle version %s (rev=%s) built at %s".format(
+        finagleVersion,
+        finagleBuildRevision,
+        p.getProperty("build_name", "?")
+      )
+    )
   }
+
+  /**
+   * Runs the initialization if it has not yet run.
+   */
+  def apply(): Unit = once()
 }

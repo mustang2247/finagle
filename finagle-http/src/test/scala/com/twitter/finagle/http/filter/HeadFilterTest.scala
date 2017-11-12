@@ -12,14 +12,14 @@ class HeadFilterTest extends FunSuite {
   val Body = "hello world"
 
   val dummyService = new Service[Request, Response] {
-   def apply(request: Request) = {
-     assert(request.method === Method.Get)
+    def apply(request: Request) = {
+      assert(request.method == Method.Get)
 
-     val response = request.response
-     response.status = Status.Ok
-     response.write(Body)
-     Future.value(response)
-   }
+      val response = Response(request)
+      response.status = Status.Ok
+      response.write(Body)
+      Future.value(response)
+    }
   }
 
   test("convert GET to HEAD") {
@@ -27,17 +27,17 @@ class HeadFilterTest extends FunSuite {
     request.method = Method.Head
 
     val response = Await.result(HeadFilter(request, dummyService))
-    assert(request.method === Method.Head) // unchanged
-    assert(response.contentLength === Some(Body.length))
-    assert(response.contentString === "")
+    assert(request.method == Method.Head) // unchanged
+    assert(response.contentLength == Some(Body.length))
+    assert(response.contentString == "")
   }
 
   test("GET is normal") {
     val request = Request("/test.json")
 
     val response = Await.result(HeadFilter(request, dummyService))
-    request.method === Method.Get // unchanged
-    assert(response.contentLength === None)
-    assert(response.contentString === Body)
+    request.method == Method.Get // unchanged
+    assert(response.contentLength == None)
+    assert(response.contentString == Body)
   }
 }

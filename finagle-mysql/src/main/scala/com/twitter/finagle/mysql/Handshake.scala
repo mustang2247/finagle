@@ -1,8 +1,8 @@
-package com.twitter.finagle.exp.mysql
+package com.twitter.finagle.mysql
 
 import com.twitter.conversions.storage._
 import com.twitter.finagle.Stack
-import com.twitter.finagle.exp.mysql.Charset.Utf8_general_ci
+import com.twitter.finagle.mysql.Charset.Utf8_general_ci
 import com.twitter.util.{Return, StorageUnit, Throw, Try}
 
 /**
@@ -16,20 +16,21 @@ class IncompatibleServerError(msg: String) extends Exception(msg)
  * a version of MySQL that the client is incompatible with.
  */
 case object IncompatibleVersion
-  extends IncompatibleServerError(
-    "This client is only compatible with MySQL version 4.1 and later"
-  )
+    extends IncompatibleServerError(
+      "This client is only compatible with MySQL version 4.1 and later"
+    )
 
 /**
  * Indicates that the server to which the client is connected is configured to use
  * a charset that the client is incompatible with.
  */
 case object IncompatibleCharset
-  extends IncompatibleServerError(
-    "This client is only compatible with UTF-8 and Latin-1 charset encoding"
-  )
+    extends IncompatibleServerError(
+      "This client is only compatible with UTF-8 and Latin-1 charset encoding"
+    )
 
 object Handshake {
+
   /**
    * A class eligible for configuring a mysql client's credentials during
    * the Handshake phase.
@@ -58,17 +59,28 @@ object Handshake {
   }
 
   /**
+    * A class eligible for configuring a mysql client's CLIENT_FOUND_ROWS flag
+    * during the Handshake phase.
+    */
+  case class FoundRows(enabled: Boolean)
+  implicit object FoundRows extends Stack.Param[FoundRows] {
+    val default = FoundRows(true)
+  }
+
+  /**
    * Creates a Handshake from a collection of [[com.twitter.finagle.Stack.Params]].
    */
   def apply(prms: Stack.Params): Handshake = {
     val Credentials(u, p) = prms[Credentials]
     val Database(db) = prms[Database]
     val Charset(cs) = prms[Charset]
+    val FoundRows(fr) = prms[FoundRows]
     Handshake(
       username = u,
       password = p,
       database = db,
-      charset = cs
+      charset = cs,
+      enableFoundRows = fr
     )
   }
 }
@@ -89,6 +101,10 @@ object Handshake {
  *
  * @param charset default character established with the server.
  *
+ * @param enableFoundRows if the server should return the number
+ * of found (matched) rows, not the number of changed rows for
+ * UPDATE and INSERT ... ON DUPLICATE KEY UPDATE statements.
+ *
  * @param maxPacketSize max size of a command packet that the
  * client intends to send to the server. The largest possible
  * packet that can be transmitted to or from a MySQL 5.5 server or
@@ -103,14 +119,22 @@ case class Handshake(
   database: Option[String] = None,
   clientCap: Capability = Capability.baseCap,
   charset: Short = Utf8_general_ci,
+  enableFoundRows: Boolean = true,
   maxPacketSize: StorageUnit = 1.gigabyte
 ) extends (HandshakeInit => Try[HandshakeResponse]) {
   import Capability._
   require(maxPacketSize <= 1.gigabyte, "max packet size can't exceed 1 gigabyte")
 
-  private[this] val newClientCap =
-    if (database.isDefined) clientCap + ConnectWithDB
-    else clientCap - ConnectWithDB
+  private[this] val newClientCap = {
+    val capDb = if (database.isDefined) {
+      clientCap + ConnectWithDB
+    } else {
+      clientCap - ConnectWithDB
+    }
+
+    if (enableFoundRows) capDb + FoundRows
+    else capDb - FoundRows
+  }
 
   private[this] def isCompatibleVersion(init: HandshakeInit) =
     if (init.serverCap.has(Capability.Protocol41)) Return(true)
@@ -124,15 +148,16 @@ case class Handshake(
     for {
       _ <- isCompatibleVersion(init)
       _ <- isCompatibleCharset(init)
-    } yield HandshakeResponse(
-      username,
-      password,
-      database,
-      newClientCap,
-      init.salt,
-      init.serverCap,
-      charset,
-      maxPacketSize.inBytes.toInt
-    )
+    } yield
+      HandshakeResponse(
+        username,
+        password,
+        database,
+        newClientCap,
+        init.salt,
+        init.serverCap,
+        charset,
+        maxPacketSize.inBytes.toInt
+      )
   }
 }

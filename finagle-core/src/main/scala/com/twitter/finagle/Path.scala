@@ -9,44 +9,28 @@ import java.util.BitSet
 /**
  * A Path comprises a sequence of byte buffers naming a
  * hierarchically-addressed object.
+ *
+ * @see The [[https://twitter.github.io/finagle/guide/Names.html#paths user guide]]
+ *      for further details.
  */
 case class Path(elems: Buf*) {
   require(elems.forall(Path.nonemptyBuf))
 
-  def startsWith(other: Path) = elems startsWith other.elems
+  def startsWith(other: Path) = elems.startsWith(other.elems)
 
-  def take(n: Int) = Path((elems take n):_*)
-  def drop(n: Int) = Path((elems drop n):_*)
+  def take(n: Int) = Path(elems.take(n): _*)
+  def drop(n: Int) = Path(elems.drop(n): _*)
   def ++(that: Path) =
     if (that.isEmpty) this
-    else Path((elems ++ that.elems):_*)
+    else Path((elems ++ that.elems): _*)
   def size = elems.size
   def isEmpty = elems.isEmpty
 
-  lazy val showElems = elems map { buf =>
-    // We're extra careful with allocation here because any time
-    // there are nonbase delegations, we need to serialize the paths
-    // to strings
-    val nbuf = buf.length
-    val bytes = Buf.ByteArray.Owned.extract(buf)
-    if (Path.showableAsString(bytes, nbuf))
-      new String(bytes, 0, nbuf, Path.Utf8Charset)
-    else {
-      val str = new StringBuilder(nbuf * 4)
-      var i = 0
-      while (i < nbuf) {
-        str.append("\\x")
-        str.append(Integer.toString((bytes(i) >> 4) & 0xf, 16))
-        str.append(Integer.toString(bytes(i) & 0xf, 16))
-        i += 1
-      }
-      str.toString
-    }
-  }
+  lazy val showElems = elems.map(Path.showElem(_))
 
-  lazy val show = "/"+(showElems mkString "/")
+  lazy val show = showElems.mkString("/", "/", "")
 
-  override def toString = "Path("+(showElems mkString ",")+")"
+  override def toString = s"""Path(${showElems.mkString(",")})"""
 }
 
 object Path {
@@ -75,7 +59,7 @@ object Path {
     ('0' to '9') ++ ('A' to 'Z') ++ ('a' to 'z') ++ "_:.#$%-".toSeq
 
   private val charSet = {
-    val bits = new BitSet(Byte.MaxValue+1)
+    val bits = new BitSet(Byte.MaxValue + 1)
     for (c <- showableChars)
       bits.set(c.toInt)
     bits
@@ -90,7 +74,7 @@ object Path {
    */
   def isShowable(ch: Char): Boolean = charSet.get(ch.toInt)
 
-  private def showableAsString(bytes: Array[Byte], size: Int): Boolean = {
+  private[finagle] def showableAsString(bytes: Array[Byte], size: Int): Boolean = {
     var i = 0
     while (i < size) {
       if (!isShowable(bytes(i).toChar))
@@ -100,14 +84,34 @@ object Path {
     true
   }
 
+  // We're extra careful with allocation here because any time
+  // there are nonbase delegations, we need to serialize the paths
+  // to strings
+  private[finagle] val showElem: Buf => String = { buf =>
+    val nbuf = buf.length
+    val bytes = Buf.ByteArray.Owned.extract(buf)
+    if (Path.showableAsString(bytes, nbuf))
+      new String(bytes, 0, nbuf, Path.Utf8Charset)
+    else {
+      val str = new StringBuilder(nbuf * 4)
+      var i = 0
+      while (i < nbuf) {
+        str.append("\\x")
+        str.append(Integer.toString((bytes(i) >> 4) & 0xf, 16))
+        str.append(Integer.toString(bytes(i) & 0xf, 16))
+        i += 1
+      }
+      str.toString
+    }
+  }
+
   /**
    * Parse `s` as a path with concrete syntax
    *
    * {{{
-   * path       ::= '/' labels
+   * path       ::= '/' labels | '/'
    *
-   * labels     ::= label '/' label
-   *                label
+   * labels     ::= label '/' labels | label
    *
    * label      ::= (\\x[a-f0-9][a-f0-9]|[0-9A-Za-z:.#$%-_])+
    *
@@ -131,18 +135,20 @@ object Path {
    */
   def read(s: String): Path = NameTreeParsers.parsePath(s)
 
- /**
-  * Utilities for constructing and pattern matching over
-  * Utf8-typed paths.
-  */
+  /**
+   * Utilities for constructing and pattern matching over
+   * Utf8-typed paths.
+   */
   object Utf8 {
     def apply(elems: String*): Path = {
-      val elems8 = elems map { el => Buf.Utf8(el) }
-      Path(elems8:_*)
+      val elems8 = elems map { el =>
+        Buf.Utf8(el)
+      }
+      Path(elems8: _*)
     }
 
     def unapplySeq(path: Path): Option[Seq[String]] = {
-      val Path(elems@_*) = path
+      val Path(elems @ _*) = path
 
       val n = elems.size
       val elemss = new Array[String](n)

@@ -1,9 +1,0 @@
-junit_tests(name='scala',
-  dependencies=[
-    '3rdparty:junit',
-    '3rdparty:specs',
-    '3rdparty:scalatest',
-    'finagle/finagle-commons-stats'
-  ],
-  sources=rglobs('*.scala')
-)

@@ -1,7 +1,6 @@
 package com.twitter.finagle
 
 import com.twitter.util.{Closable, Var, FuturePool}
-import java.net.InetSocketAddress
 
 /**
  * A Resolver that asynchronously resolves an inet address.
@@ -14,7 +13,7 @@ class TestAsyncInetResolver extends Resolver {
   private[this] object Port {
     val range = 1 to 65535
     def unapply(str: String): Option[Int] = {
-      try Some(Integer.parseInt(str)) filter(range contains _)
+      try Some(Integer.parseInt(str)) filter (range contains _)
       catch { case _: NumberFormatException => None }
     }
   }
@@ -33,12 +32,12 @@ class TestAsyncInetResolver extends Resolver {
     case HostPort(host, port) =>
       Var.async[Addr](Addr.Pending) { update =>
         pool {
-          update() = Addr.Bound(new InetSocketAddress(host, port))
+          update() = Addr.Bound(Address(host, port))
         }
         Closable.nop
       }
 
-    case _ => Var.value(Addr.Failed(spec +" is not a host:port"))
+    case _ => Var.value(Addr.Failed(spec + " is not a host:port"))
   }
 
 }

@@ -3,7 +3,6 @@ package com.twitter.finagle.serverset2
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.Assertions._
 
 class TestIdentity extends Identity {
   val scheme = "test"
@@ -17,17 +16,25 @@ class IdentityTest extends FunSuite {
     val userIdent = new UserIdentity()
     val currentUser = System.getProperty("user.name")
 
-    assert(userIdent.id === Some(currentUser))
-    assert(userIdent.scheme === "user")
+    assert(userIdent.id == Some(currentUser))
+    assert(userIdent.scheme == "user")
   }
 
   test("Identities.get() returns TestIdentity before UserIdentity") {
     val userIdent = new UserIdentity()
     val testIdent = new TestIdentity()
 
-    assert(Identities.get() === Seq(
-      "/%s/%s".format(testIdent.scheme, testIdent.id.get),
-      "/%s/%s".format(userIdent.scheme, userIdent.id.get))
+    assert(
+      Identities
+        .get()
+        .filter(
+          identity =>
+            (identity.startsWith("/%s/".format(testIdent.scheme)) ||
+              identity.startsWith("/%s/".format(userIdent.scheme)))
+        ) == Seq(
+        "/%s/%s".format(testIdent.scheme, testIdent.id.get),
+        "/%s/%s".format(userIdent.scheme, userIdent.id.get)
+      )
     )
   }
 }

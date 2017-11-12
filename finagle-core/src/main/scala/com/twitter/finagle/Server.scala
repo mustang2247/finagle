@@ -10,11 +10,8 @@ import java.net.{InetSocketAddress, SocketAddress}
  * server. Closing a server instance unbinds the port and
  * relinquishes resources that are associated with the server.
  */
-trait ListeningServer
-  extends Closable
-  with Awaitable[Unit]
-  with Group[SocketAddress]
-{
+trait ListeningServer extends Closable with Awaitable[Unit] {
+
   /**
    * The address to which this server is bound.
    */
@@ -44,9 +41,16 @@ trait ListeningServer
   final def close(deadline: Time): Future[Unit] = synchronized {
     isClosed = true
     val collected = Future.collect(announcements)
-    collected flatMap { list =>
-      Closable.all(list:_*).close(deadline) before closeServer(deadline)
-    }
+    Future.join(
+      Seq(
+        collected.flatMap { list =>
+          Closable.all(list: _*).close(deadline)
+        },
+        // StackServer assumes that closeServer is called synchronously, so we must be
+        // careful that it doesn't get scheduled for later.
+        closeServer(deadline)
+      )
+    )
   }
 }
 
@@ -105,6 +109,7 @@ object NullServer extends ListeningServer with CloseAwaitably {
  * when the service is closed. Omitting the `addr` will bind to an ephemeral port.
  */
 trait Server[Req, Rep] {
+
   /** $addr */
   def serve(addr: SocketAddress, service: ServiceFactory[Req, Rep]): ListeningServer
 
@@ -121,15 +126,38 @@ trait Server[Req, Rep] {
     serve(addr, ServiceFactory.const(service))
 
   /** $serveAndAnnounce */
-  def serveAndAnnounce(forum: String, addr: String, service: ServiceFactory[Req, Rep]): ListeningServer = {
+  def serveAndAnnounce(
+    name: String,
+    addr: SocketAddress,
+    service: ServiceFactory[Req, Rep]
+  ): ListeningServer = {
     val server = serve(addr, service)
-    server.announce(forum)
+    server.announce(name)
+    server
+  }
+
+  /** $serveAndAnnounce */
+  def serveAndAnnounce(
+    name: String,
+    addr: SocketAddress,
+    service: Service[Req, Rep]
+  ): ListeningServer =
+    serveAndAnnounce(name, addr, ServiceFactory.const(service))
+
+  /** $serveAndAnnounce */
+  def serveAndAnnounce(
+    name: String,
+    addr: String,
+    service: ServiceFactory[Req, Rep]
+  ): ListeningServer = {
+    val server = serve(addr, service)
+    server.announce(name)
     server
   }
 
   /** $serveAndAnnounce */
   def serveAndAnnounce(name: String, addr: String, service: Service[Req, Rep]): ListeningServer =
-    serveAndAnnounce(addr, name, ServiceFactory.const(service))
+    serveAndAnnounce(name, addr, ServiceFactory.const(service))
 
   /** $serveAndAnnounce */
   def serveAndAnnounce(name: String, service: ServiceFactory[Req, Rep]): ListeningServer =

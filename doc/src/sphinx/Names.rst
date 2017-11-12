@@ -1,14 +1,16 @@
 Names and Naming in Finagle
 ===========================
 
+.. _finagle_names:
+
 Finagle uses *names* [#names]_ to identify network locations. Names must be
 supplied when constructing a Finagle client through
-:api:`ClientBuilder.dest <com.twitter.finagle.builder.ClientBuilder>`
+:api:`ClientBuilder.dest <com/twitter/finagle/builder/ClientBuilder>`
 or through implementations of :api:`Client
-<com.twitter.finagle.Client>`.
+<com/twitter/finagle/Client>`.
 
 Names are represented by the data-type :api:`Name
-<com.twitter.finagle.Name>` comprising two variants:
+<com/twitter/finagle/Name>` comprising two variants:
 
 ``case class Name.Bound(va: Var[Addr])``
 	Identifies a set of network locations. ``Var[Addr]`` (see :ref:`addr`)
@@ -17,10 +19,10 @@ Names are represented by the data-type :api:`Name
 
 ``case class Name.Path(path: Path)``
 	Represents a name denoted by a hierarchical :api:`path
-	<com.twitter.finagle.Path>`, represented by a sequence of byte
+	<com/twitter/finagle/Path>`, represented by a sequence of byte
 	strings.
 
-:api:`Resolver.eval <com.twitter.finagle.Resolver$>` parses strings
+:api:`Resolver.eval <com/twitter/finagle/Resolver$>` parses strings
 into `Names`. Strings of the form
 
 ::
@@ -75,6 +77,8 @@ The name
 
 might denote the ``crawler`` service.
 
+.. _dtabs:
+
 Interpreting Paths With Delegation Tables
 -----------------------------------------
 
@@ -95,7 +99,7 @@ where ``src`` and ``dest`` are paths. As an example, the delegation
 
 	/s	=>	/s#/foo/bar
 
-rewrites the path 
+rewrites the path
 
 ::
 
@@ -110,6 +114,31 @@ to
 Note that prefixes match on path `components`, not characters; e.g.
 `/s` is a prefix of `/s/crawler`, but not of `/s#/foo/bar/crawler`.
 
+Furthermore, prefixes may contain the wildcard character `*` to match
+any component. For example
+
+::
+
+	/s#/*/bar	=>	/t/bah
+
+rewrites the paths
+
+::
+
+	/s#/foo/bar/baz
+
+or
+
+::
+
+	/s#/boo/bar/baz
+
+to
+
+::
+
+	/t/bah/baz
+
 Paths beginning with ``/$/`` are called "system paths." They are interpreted
 specially by Finagle, similarly to resolver schemes. Paths of the form
 
@@ -117,7 +146,7 @@ specially by Finagle, similarly to resolver schemes. Paths of the form
 
 	/$/namer/path..
 
-uses the given :api:`Namer <com.twitter.finagle.Namer>` to interpret the
+uses the given :api:`Namer <com/twitter/finagle/Namer>` to interpret the
 remaining path. This allows Finagle to translate paths into addresses. For
 example
 
@@ -133,6 +162,24 @@ is bound by Finagle to the Internet address ``localhost:8080``. Similarly,
 
 is the path describing the serverset_ ``/foo/bar`` on the ZooKeeper
 ensemble ``zk.local.twitter.com:2181``.
+
+Dtabs may contain line-oriented comments beginning with ``#``. ``#``
+must be preceded by a whitespace character or delimiter such as ``;``,
+``|``, or ``&``.  For example, this Dtab with commentary:
+
+::
+
+        # delegation for /s
+        /s => /a      # prefer /a
+            | ( /b    # or share traffic between /b and /c
+              & /c
+              );
+
+is equivalent to this Dtab without commentary:
+
+::
+
+       /s => /a | (/b & /c);
 
 We use dtabs to define how logical names (e.g. ``/s/crawler``)
 translate into addresses. Because rewriting is abstracted away, we can
@@ -187,7 +234,7 @@ would recurse; for example the name ``/s/crawler`` would be rewritten
 	/s/prefix/crawler
 	/s/prefix/prefix/crawler
 	...
-	
+
 and so on. With ``/s#``, we'd instead add
 
 ::
@@ -216,7 +263,7 @@ Dtab
 	/s    => /s#;                              (e)
 	/s#   => /s##/staging;                     (f)
 
-``/s/crawler`` would then be rewritten as follows. Each step is 
+``/s/crawler`` would then be rewritten as follows. Each step is
 labelled with the rule applied from the above Dtab.
 
 ::
@@ -235,7 +282,7 @@ delegation.
 
 The combined effect is a fallback mechanism --- if the
 ``crawler`` exists in the staging environment, it is used; otherwise
-we fall back to its production definition. 
+we fall back to its production definition.
 
 In the above example, if ``/staging/crawler`` did not exist on
 ``zk.local.twitter.com:2181``, the search would backtrack from (a),
@@ -253,7 +300,7 @@ producing the following set of rewrites:
 	  (c) /zk/zk.local.twitter.com:2181/prod/crawler
 	  (b) /zk#/zk.local.twitter.com:2181/prod/crawler
 	  (a) /$/com.twitter.serverset/zk.local.twitter.com:2181/prod/crawler
-	
+
 We now see that delegations provide a simple and flexible means by
 which to define a namespace. Its effect is similar to that of a Unix
 mount table: Names stand on their own, but the minutiae of binding is
@@ -270,12 +317,12 @@ delegation expressing this override.
 
 Finagle has protocol support for delegation passing in :ref:`TTwitter
 <thrift_and_scrooge>`, :ref:`Mux <mux>`, its variant :api:`ThriftMux
-<com.twitter.finagle.ThriftMux$>`, and :api:`HTTP
-<com.twitter.finagle.Http$>`. When these protocols are used,
+<com/twitter/finagle/ThriftMux$>`, and :api:`HTTP
+<com/twitter/finagle/Http$>`. When these protocols are used,
 delegations that are added dynamically to a request are in effect
 throughout the distributed request graph --- i.e. scope of the
 namespace is a transaction. Delegations are added dynamically through
-the :api:`Dtab <com.twitter.finagle.Dtab$>` API.
+the :api:`Dtab <com/twitter/finagle/Dtab$>` API.
 
 (This is a powerful facility that should be used with care.)
 
@@ -285,8 +332,8 @@ Addr
 ----
 
 `Name.Bound` comprises a ``Var[Addr]``, representing a dynamically
-changing :api:`Addr <com.twitter.finagle.Addr>`. (:util:`Var
-<com.twitter.util.Var>` implements a form of self-adjusting
+changing :api:`Addr <com/twitter/finagle/Addr>`. (:util:`Var
+<com/twitter/util/Var>` implements a form of self-adjusting
 computation); ``Addrs`` are in one of 3 states:
 
 ``Addr.Pending``
@@ -299,14 +346,14 @@ computation); ``Addrs`` are in one of 3 states:
 ``Addr.Failed(cause: Throwable)``
 	The binding failed with the given ``cause``.
 
-``Addr.Bound(addrs: Set[SocketAddress])``
+``Addr.Bound(addrs: Set[Address])``
 	The binding succeeded with the given set of addresses, representing
 	concrete endpoints.
 
 We now see that a ``Var[Addr]`` is capable of representing a moving target,
 for example a dynamic serverset_.
 
-.. _serverset: http://twitter.github.io/commons/apidocs/com/twitter/common/zookeeper/ServerSet.html
+.. _serverset: https://twitter.github.io/commons/apidocs/com/twitter/common/zookeeper/ServerSet.html
 
 .. rubric:: Footnotes
 .. [#names] A `name` identities *what* you want; an

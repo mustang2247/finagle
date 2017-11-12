@@ -2,7 +2,6 @@ package com.twitter.finagle.mux.lease.exp
 
 import com.twitter.util.{Duration, Stopwatch, StorageUnit, Time}
 import com.twitter.conversions.time.longToTimeableNumber
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
 
 /**
  * `Alarm` describes whether a thread is ready to wake up, and if it's not
@@ -22,6 +21,7 @@ private[lease] trait Alarm {
  * it's ready to wake up.
  */
 private[lease] object Alarm {
+
   /**
    * `arm` requires that a function that returns an alarm be passed to it--
    * calling apply on the function should do setup, and then also return the
@@ -29,10 +29,8 @@ private[lease] object Alarm {
    */
   def arm(setup: () => Alarm) {
     val alarm = setup()
-    while (!alarm.finished)
-      Time.sleep(alarm.sleeptime)
+    while (!alarm.finished) Time.sleep(alarm.sleeptime)
   }
-
 
   /**
    * `armAndExecute` behaves similarly to `arm`, except that it interleaves the
@@ -67,9 +65,10 @@ private[lease] class DurationAlarm(dur: Duration) extends Alarm {
 private[lease] class GenerationAlarm(
   ctr: ByteCounter
 ) extends PredicateAlarm({
-  val generation = ctr.info.generation()
-  () => generation != ctr.info.generation()
-})
+      val generation = ctr.info.generation()
+      () =>
+        generation != ctr.info.generation()
+    })
 
 private[lease] class IntervalAlarm(val sleeptime: Duration) extends Alarm {
   def finished: Boolean = false
@@ -84,18 +83,20 @@ private[lease] class PredicateAlarm(pred: () => Boolean) extends Alarm {
 // when it rolls over
 private[lease] class BytesAlarm(counter: ByteCounter, bytes: () => StorageUnit) extends Alarm {
   // we can refactor out the alternative minimum with an IntervalAlarm
-  private[this] val P = 100  // poll period (ms)
+  private[this] val P = 100 // poll period (ms)
 
   private[this] def target(): StorageUnit = counter.info.remaining() - bytes()
 
   def sleeptime: Duration = {
     val currentRate = counter.rate() // bytes per millisecond
-    val targetMs = if (currentRate <= 0) P else {
-      // 80% of what's predicted by rate()
-      // 800 == 8 / 10 * 1000
-      // 8 / 10 == 80%
-      math.max((target().inBytes * 0.8 / currentRate).toLong, P / 10)
-    }
+    val targetMs =
+      if (currentRate <= 0) P
+      else {
+        // 80% of what's predicted by rate()
+        // 800 == 8 / 10 * 1000
+        // 8 / 10 == 80%
+        math.max((target().inBytes * 0.8 / currentRate).toLong, P / 10)
+      }
     math.max(math.min(targetMs, P), 0).milliseconds
   }
 

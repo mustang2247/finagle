@@ -1,99 +1,109 @@
 package com.twitter.finagle.memcached.unit.protocol.text.client
 
-import com.twitter.finagle.memcached.protocol.text.client.Decoder
-import com.twitter.finagle.memcached.protocol.text.{TokensWithData, ValueLines, Tokens, StatLines}
-import com.twitter.finagle.memcached.util.ChannelBufferUtils._
-import org.junit.runner.RunWith
+import com.twitter.finagle.memcached.protocol.text.client.ClientDecoder
+import com.twitter.finagle.memcached.protocol.text.{
+  Decoding,
+  StatLines,
+  Tokens,
+  TokensWithData,
+  ValueLines
+}
+import com.twitter.io.Buf
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
+import scala.collection.mutable
 
-@RunWith(classOf[JUnitRunner])
 class DecoderTest extends FunSuite with MockitoSugar {
 
-  class Context {
-    val decoder = new Decoder
-    decoder.start()
+  private class DecodingClientDecoder extends ClientDecoder[Decoding] {
+    type Value = TokensWithData
+
+    protected def parseValue(tokens: Seq[Buf], data: Buf): TokensWithData =
+      TokensWithData(tokens, data, None)
+
+    protected def parseResponse(tokens: Seq[Buf]): Decoding = Tokens(tokens)
+    protected def parseResponseValues(valueLines: Seq[TokensWithData]): Decoding =
+      ValueLines(valueLines)
+    protected def parseStatLines(lines: Seq[Tokens]): Decoding = StatLines(lines.map(Tokens(_)))
   }
 
-  test("decode tokens with full delimiter") {
-    val context = new Context
-    import context._
+  private class Context {
+    val decoder = new DecodingClientDecoder
 
-    val buffer = "STORED\r\n"
-    assert(decoder.decode(null, null, buffer) === Tokens(Seq("STORED")))
+    def decodeString(data: String): Seq[Decoding] = {
+      val out = new mutable.ArrayBuffer[Decoding]()
+      decoder.decodeData(Buf.Utf8(data), out)
+      out
+    }
   }
 
-  test("decode tokens with partial delimiter") {
+  test("decode tokens") {
     val context = new Context
-    import context._
-
-    val buffer = "STORED\r"
-    assert(decoder.decode(null, null, buffer) === null)
-  }
-
-  test("decode tokens without delimiter") {
-    val context = new Context
-    import context._
-
-    val buffer = "STORED"
-    assert(decoder.decode(null, null, buffer) === null)
+    assert(context.decodeString("STORED") == Seq(Tokens(Seq(Buf.Utf8("STORED")))))
   }
 
   test("decode data") {
     val context = new Context
-    import context._
 
-    val buffer = stringToChannelBuffer("VALUE foo 0 1\r\n1\r\nVALUE bar 0 2\r\n12\r\nEND\r\n")
-    // These are called once for each state transition (i.e., once per \r\n)
-    // by the FramedCodec
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    assert(decoder.decode(null, null, buffer) === ValueLines(Seq(
-      TokensWithData(Seq("VALUE", "foo", "0", "1"), "1"),
-      TokensWithData(Seq("VALUE", "bar", "0", "2"), "12"))))
+    assert(context.decodeString("VALUE foo 0 1").isEmpty)
+    assert(context.decodeString("1").isEmpty)
+    assert(context.decodeString("VALUE bar 0 2").isEmpty)
+    assert(context.decodeString("12").isEmpty)
+    assert(
+      context.decodeString("END") == Seq(
+        ValueLines(
+          Seq(
+            TokensWithData(Seq("VALUE", "foo", "0", "1") map { Buf.Utf8(_) }, Buf.Utf8("1")),
+            TokensWithData(Seq("VALUE", "bar", "0", "2") map { Buf.Utf8(_) }, Buf.Utf8("12"))
+          )
+        )
+      )
+    )
   }
 
   test("decode data with flag") {
     val context = new Context
-    import context._
 
-    val buffer = stringToChannelBuffer("VALUE foo 20 1\r\n1\r\nVALUE bar 10 2\r\n12\r\nEND\r\n")
-    // These are called once for each state transition (i.e., once per \r\n)
-    // by the FramedCodec
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    assert(decoder.decode(null, null, buffer) === ValueLines(Seq(
-      TokensWithData(Seq("VALUE", "foo", "20", "1"), "1"),
-      TokensWithData(Seq("VALUE", "bar", "10", "2"), "12"))))
+    assert(context.decodeString("VALUE foo 20 1").isEmpty)
+    assert(context.decodeString("1").isEmpty)
+    assert(context.decodeString("VALUE bar 10 2").isEmpty)
+    assert(context.decodeString("12").isEmpty)
+    assert(
+      context.decodeString("END") == Seq(
+        ValueLines(
+          Seq(
+            TokensWithData(Seq("VALUE", "foo", "20", "1") map { Buf.Utf8(_) }, Buf.Utf8("1")),
+            TokensWithData(Seq("VALUE", "bar", "10", "2") map { Buf.Utf8(_) }, Buf.Utf8("12"))
+          )
+        )
+      )
+    )
   }
 
   test("decode end") {
     val context = new Context
-    import context._
 
-    val buffer = "END\r\n"
-    assert(decoder.decode(null, null, buffer) === ValueLines(Seq[TokensWithData]()))
+    assert(context.decodeString("END") == Seq(ValueLines(Seq[TokensWithData]())))
   }
 
   test("decode stats") {
     val context = new Context
-    import context._
 
-    val buffer = stringToChannelBuffer("STAT items:1:number 1\r\nSTAT items:1:age 1468\r\nITEM foo [5 b; 1322514067 s]\r\nEND\r\n")
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    decoder.decode(null, null, buffer)
-    val lines = decoder.decode(null, null, buffer)
-    assert(lines === StatLines(Seq(
-      Tokens(Seq("STAT", "items:1:number", "1")),
-      Tokens(Seq("STAT", "items:1:age", "1468")),
-      Tokens(Seq("ITEM", "foo", "[5", "b;", "1322514067", "s]"))
-    )))
+    assert(context.decodeString("STAT items:1:number 1").isEmpty)
+    assert(context.decodeString("STAT items:1:age 1468").isEmpty)
+    assert(context.decodeString("ITEM foo [5 b; 1322514067 s]").isEmpty)
+    val lines = context.decodeString("END")
+    assert(
+      lines == Seq(
+        StatLines(
+          Seq(
+            Tokens(Seq("STAT", "items:1:number", "1") map { Buf.Utf8(_) }),
+            Tokens(Seq("STAT", "items:1:age", "1468") map { Buf.Utf8(_) }),
+            Tokens(Seq("ITEM", "foo", "[5", "b;", "1322514067", "s]") map { Buf.Utf8(_) })
+          )
+        )
+      )
+    )
   }
 
 }

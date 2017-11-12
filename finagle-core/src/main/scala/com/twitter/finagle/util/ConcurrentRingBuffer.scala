@@ -7,11 +7,6 @@ import scala.reflect.ClassTag
 /**
  * A simple, lock-free, non-blocking ring buffer.
  *
- * This differs from [[com.twitter.util.RingBuffer]] in that it is
- * simpler (fewer features), and is fully concurrent (and hence also
- * threadsafe). This should probably be  moved into util at some
- * point.
- *
  * '''Note:''' For very high-rate usages, sizing buffers by powers of
  * two may be advantageous.
  *
@@ -20,7 +15,7 @@ import scala.reflect.ClassTag
  * references (though this would require another allocation for each
  * item).
  */
-class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
+private[finagle] class ConcurrentRingBuffer[T: ClassTag](capacity: Int) {
   assert(capacity > 0)
 
   private[this] val nextRead, nextWrite = new AtomicLong(0)
@@ -48,8 +43,8 @@ class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
     if (w < r)
       return None
 
-    val el = ring((r%capacity).toInt)
-    if (nextRead.compareAndSet(r, r+1))
+    val el = ring((r % capacity).toInt)
+    if (nextRead.compareAndSet(r, r + 1))
       Some(el)
     else
       tryGet()
@@ -65,7 +60,7 @@ class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
     val r = nextRead.get
 
     if (w < r) None
-    else Some(ring((r%capacity).toInt))
+    else Some(ring((r % capacity).toInt))
   }
 
   /**
@@ -80,8 +75,9 @@ class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
     if (w - r >= capacity)
       return false
 
-    if (!nextWrite.compareAndSet(w, w+1)) tryPut(el) else {
-      ring((w%capacity).toInt) = el
+    if (!nextWrite.compareAndSet(w, w + 1)) tryPut(el)
+    else {
+      ring((w % capacity).toInt) = el
       publish(w)
       true
     }

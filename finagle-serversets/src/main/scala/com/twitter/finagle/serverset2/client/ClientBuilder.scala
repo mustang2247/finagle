@@ -1,10 +1,10 @@
 package com.twitter.finagle.serverset2.client
 
 import com.twitter.conversions.time._
-import com.twitter.util.Duration
+import com.twitter.util.{Duration, Timer}
 import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
 import com.twitter.io.Buf
-import com.twitter.finagle.util.LoadService
+import com.twitter.finagle.util.{DefaultTimer, LoadService}
 import java.net.InetSocketAddress
 
 private[serverset2] sealed trait Capability
@@ -19,30 +19,31 @@ private[serverset2] trait ClientFactory[T <: ZooKeeperClient] {
 }
 
 private[client] case class ClientConfig(
-    val hosts: String,
-    val sessionTimeout: Duration,
-    val statsReceiver: StatsReceiver,
-    val readOnlyOK: Boolean,
-    val sessionId: Option[Long],
-    val password: Option[Buf])
-{
-  def toMap = Map(
+  val hosts: String,
+  val sessionTimeout: Duration,
+  val statsReceiver: StatsReceiver,
+  val readOnlyOK: Boolean,
+  val sessionId: Option[Long],
+  val password: Option[Buf],
+  val timer: Timer
+) {
+  def toMap: Map[String, Any] = Map(
     "hosts" -> hosts,
     "sessionTimeout" -> sessionTimeout,
     "statsReceiver" -> statsReceiver,
     "readOnlyOK" -> readOnlyOK,
     "sessionId" -> sessionId,
-    "password" -> password
+    "password" -> password,
+    "timer" -> timer
   )
 
   override def toString = {
-    "ClientConfig(%s)".format(
-      toMap flatMap {
-        case (k, Some(v)) =>
-          Some("%s=%s".format(k, v))
-        case _ =>
-          None
-      } mkString(", "))
+    "ClientConfig(%s)".format(toMap flatMap {
+      case (k, Some(v)) =>
+        Some("%s=%s".format(k, v))
+      case _ =>
+        None
+    } mkString (", "))
   }
 }
 
@@ -57,6 +58,7 @@ private[client] case class ClientConfig(
  * readOnlyOK() enables read-only support from disconnected observers. [False]
  * sessionId(id) sets session ID for reconnection. [None]
  * password(pwd) sets session Password for reconnection. [None]
+ * timer(timer) sets Timer [DefaultTimer.twitter]
  *
  * Build:
  *
@@ -71,7 +73,8 @@ private[serverset2] object ClientBuilder {
     statsReceiver = DefaultStatsReceiver.scope("zkclient"),
     readOnlyOK = false,
     sessionId = None,
-    password = None
+    password = None,
+    timer = DefaultTimer
   )
 
   def apply() = new ClientBuilder(DefaultConfig)
@@ -83,12 +86,13 @@ private[serverset2] object ClientBuilder {
 }
 
 private[client] class ClientBuilder(config: ClientConfig) {
-  private def resolve[T <: ZooKeeperClient](cap: Capability) = LoadService[ClientFactory[T]]()
+  private def resolve[T <: ZooKeeperClient](cap: Capability) =
+    LoadService[ClientFactory[T]]()
       .filter(_.capabilities.contains(cap))
       .sortBy(_.priority) match {
-    case Seq() => throw new RuntimeException("No ZooKeeper ClientFactory Found")
-    case Seq(f, _*) => f
-  }
+      case Seq() => throw new RuntimeException("No ZooKeeper ClientFactory Found")
+      case Seq(f, _*) => f
+    }
 
   override def toString() = "ClientBuilder(%s)".format(config.toString)
 
@@ -138,7 +142,9 @@ private[client] class ClientBuilder(config: ClientConfig) {
    * @return configured ClientBuilder
    */
   def hosts(zkHosts: Seq[InetSocketAddress]): ClientBuilder =
-    hosts(zkHosts map { h => "%s:%d,".format(h.getHostName, h.getPort) } mkString)
+    hosts(zkHosts.map { h =>
+      "%s:%d,".format(h.getHostName, h.getPort)
+    }.mkString)
 
   /**
    * Configure builder with a session timeout.
@@ -189,4 +195,13 @@ private[client] class ClientBuilder(config: ClientConfig) {
    */
   def password(password: Buf): ClientBuilder =
     withConfig(_.copy(password = Some(password)))
+
+  /**
+   * Configure builder with a new timer.
+   *
+   * @param timer Timer to use.
+   * @return configured ClientBuilder
+   */
+  def timer(timer: Timer): ClientBuilder =
+    withConfig(_.copy(timer = timer))
 }

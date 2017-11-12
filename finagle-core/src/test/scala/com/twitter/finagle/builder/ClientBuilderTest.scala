@@ -1,117 +1,178 @@
 package com.twitter.finagle.builder
 
-import org.mockito.Mockito.{verify, when}
-import org.mockito.Matchers
-import org.mockito.Matchers._
-import org.scalatest.FunSuite
-import org.scalatest.mock.MockitoSugar
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.junit.runner.RunWith
-import com.twitter.finagle.integration.IntegrationBase
-import com.twitter.finagle.{WriteException, Service, ServiceFactory}
-import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.conversions.time._
+import com.twitter.finagle._
+import com.twitter.finagle.client.StringClient
+import com.twitter.finagle.param.ProtocolLibrary
+import com.twitter.finagle.service.RetryPolicy
+import com.twitter.finagle.ssl.Engine
+import com.twitter.finagle.ssl.client.{
+  SslClientConfiguration,
+  SslClientEngineFactory,
+  SslClientSessionVerifier
+}
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
+import com.twitter.finagle.transport.Transport
 import com.twitter.util._
+import java.net.InetSocketAddress
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+import javax.net.ssl.SSLSession
+import org.mockito.Matchers._
+import org.mockito.Mockito.when
+import org.scalatest.FunSuite
+import org.scalatest.concurrent.{Eventually, IntegrationPatience}
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
-class ClientBuilderTest extends FunSuite
-  with Eventually
-  with IntegrationPatience
-  with MockitoSugar
-  with IntegrationBase {
+class ClientBuilderTest
+    extends FunSuite
+    with Eventually
+    with IntegrationPatience
+    with MockitoSugar {
 
-  trait ClientBuilderHelper {
-    val preparedFactory = mock[ServiceFactory[String, String]]
-    val preparedServicePromise = new Promise[Service[String, String]]
-    when(preparedFactory()) thenReturn preparedServicePromise
-    when(preparedFactory.close(any[Time])) thenReturn Future.Done
-    when(preparedFactory.map(Matchers.any())) thenReturn
-      preparedFactory.asInstanceOf[ServiceFactory[Any, Nothing]]
+  private class MyException extends Exception
 
-    val m = new MockChannel
-    when(m.codec.prepareConnFactory(any[ServiceFactory[String, String]])) thenReturn preparedFactory
+  private val retryMyExceptionOnce = RetryPolicy.tries[Try[Nothing]](
+    2, // 2 tries == 1 attempt + 1 retry
+    { case Throw(_: MyException) => true }
+  )
+
+  test("ClientBuilder should collect stats on 'tries' for retrypolicy") {
+    val service = mock[Service[String, String]]
+    when(service("123")) thenReturn Future.exception(new MyException())
+    when(service.close(any[Time])) thenReturn Future.Done
+
+    val inMemory = new InMemoryStatsReceiver
+    val builder = ClientBuilder()
+      .stack(StringClient.client.withEndpoint(service))
+      .failFast(false)
+      .name("test")
+      .hostConnectionLimit(1)
+      .daemon(true) // don't create an exit guard
+      .hosts(Seq(new InetSocketAddress(0)))
+      .retryPolicy(retryMyExceptionOnce)
+      .reportTo(inMemory)
+
+    val client = builder.build()
+
+    Await.ready(client("123"), 10.seconds)
+
+    assert(inMemory.counters(Seq("test", "tries", "requests")) == 1)
+
+    // 1 request + 1 retry
+    assert(inMemory.counters(Seq("test", "requests")) == 2)
   }
 
-  test("ClientBuilder should invoke prepareConnFactory on connection") {
-    new ClientBuilderHelper {
-      val client = m.build()
-      val requestFuture = client("123")
+  test("ClientBuilder should collect stats on 'tries' with no retrypolicy") {
+    val service = mock[Service[String, String]]
+    when(service("123")) thenReturn Future.exception(WriteException(new Exception()))
+    when(service.close(any[Time])) thenReturn Future.Done
 
-      verify(m.codec).prepareConnFactory(any[ServiceFactory[String, String]])
-      verify(preparedFactory)()
+    val inMemory = new InMemoryStatsReceiver
+    val numFailures = 21 // There will be 20 requeues by default
+    val builder = ClientBuilder()
+      .stack(StringClient.client.withEndpoint(service))
+      .failFast(false)
+      .name("test")
+      .hostConnectionLimit(1)
+      .daemon(true) // don't create an exit guard
+      .hosts(Seq(new InetSocketAddress(0)))
+      .failureAccrualParams(25 -> Duration.fromSeconds(10))
+      .reportTo(inMemory)
 
-      assert(!requestFuture.isDefined)
-      val service = mock[Service[String, String]]
-      when(service("123")) thenReturn Future.value("321")
-      when(service.close(any[Time])) thenReturn Future.Done
-      preparedServicePromise() = Return(service)
+    val client = builder.build()
 
-      verify(service)("123")
-      assert(requestFuture.poll === Some(Return("321")))
+    Await.ready(client("123"), 10.seconds)
+
+    assert(inMemory.counters(Seq("test", "tries", "requests")) == 1)
+    // failure accrual marks the only node in the balancer as Busy which in turn caps requeues
+    // this relies on a retry budget that allows for `numFailures` requeues
+    assert(inMemory.counters(Seq("test", "requests")) == numFailures)
+  }
+
+  private class SpecificException extends RuntimeException
+
+  test("Retries have locals propagated") {
+    val specificExceptionRetry: PartialFunction[Try[Nothing], Boolean] = {
+      case Throw(e: SpecificException) => true
     }
+
+    val aLocal = new Local[Int]
+    val first = new AtomicBoolean(false)
+    val localOnRetry = new AtomicInteger(0)
+
+    // 1st call fails and triggers a retry which
+    // captures the value of the local
+    val service = Service.mk[String, String] { str: String =>
+      if (first.compareAndSet(false, true)) {
+        Future.exception(new SpecificException())
+      } else {
+        localOnRetry.set(aLocal().getOrElse(-1))
+        Future(str)
+      }
+    }
+
+    val builder = ClientBuilder()
+      .stack(StringClient.client.withEndpoint(service))
+      .failFast(false)
+      .name("test")
+      .hostConnectionLimit(1)
+      .daemon(true) // don't create an exit guard
+      .hosts(Seq(new InetSocketAddress(0)))
+      .retryPolicy(RetryPolicy.tries(2, specificExceptionRetry))
+      .reportTo(NullStatsReceiver)
+    val client = builder.build()
+
+    aLocal.let(999) {
+      val rep = client("hi")
+      assert("hi" == Await.result(rep, Duration.fromSeconds(5)))
+    }
+    assert(999 == localOnRetry.get)
+  }
+
+  test("configured") {
+    val cb = ClientBuilder()
+    assert(!cb.params.contains[ProtocolLibrary])
+    val configured = cb.configured(ProtocolLibrary("derp"))
+    assert(configured.params.contains[ProtocolLibrary])
+    assert("derp" == configured.params[ProtocolLibrary].name)
   }
 
   test("ClientBuilder should close properly") {
-    new ClientBuilderHelper {
-      val svc = ClientBuilder().hostConnectionLimit(1).codec(m.codec).hosts("").build()
-      val f = svc.close()
-      eventually {
-        f.isDefined
-      }
-    }
+    val svc = ClientBuilder().stack(StringClient.client).hostConnectionCoresize(1).hosts("").build()
+    val f = svc.close()
+    eventually { f.isDefined }
   }
 
-  test("ClientBuilder should collect stats on 'tries' for retrypolicy") {
-    new ClientBuilderHelper {
-      val inMemory = new InMemoryStatsReceiver
-      val client = ClientBuilder()
-        .name("test")
-        .hostConnectionLimit(1)
-        .codec(m.codec)
-        .hosts(Seq(m.clientAddress))
-        .retries(2) // retries === total attempts :(
-        .reportTo(inMemory)
-        .build()
-
-      val service = mock[Service[String, String]]
-      when(service("123")) thenReturn Future.exception(WriteException(new Exception()))
-      when(service.close(any[Time])) thenReturn Future.Done
-      preparedServicePromise() = Return(service)
-
-      val f = client("123")
-
-      assert(f.isDefined)
-      assert(inMemory.counters(Seq("test", "tries", "requests")) === 1)
-      assert(inMemory.counters(Seq("test", "requests")) === 2)
-    }
+  private val config = SslClientConfiguration()
+  private val engine = mock[Engine]
+  private val engineFactory = new SslClientEngineFactory {
+    def apply(address: Address, config: SslClientConfiguration): Engine = engine
+  }
+  private val sessionVerifier = new SslClientSessionVerifier {
+    def apply(address: Address, config: SslClientConfiguration, session: SSLSession): Boolean = true
   }
 
+  test("ClientBuilder sets SSL/TLS configuration") {
+    val client = ClientBuilder().tls(config)
+    assert(client.params[Transport.ClientSsl].sslClientConfiguration == Some(config))
+  }
 
-  /* TODO: Stopwatches eliminated mocking.
-    "measure codec connection preparation latency" in {
-      Time.withCurrentTimeFrozen { timeControl =>
-        val m = new MockChannel {
-          codec.prepareConnFactory(any) answers { s =>
-            val factory = s.asInstanceOf[ServiceFactory[String, String]]
-            // Create a fake ServiceFactory that take time to return a dummy Service
-            new ServiceFactoryProxy[String, String](factory) {
-              override def apply(con: ClientConnection) = {
-                timeControl.advance(500.milliseconds)
-                Future.value(new Service[String, String] {
-                  def apply(req: String) = Future.value(req)
-                })
-              }
-            }
-          }
-        }
-        val service = m.clientBuilder.build()
-        timeControl.advance(100.milliseconds)
-        service("blabla")
+  test("ClientBuilder sets SSL/TLS configuration, engine factory") {
+    val client = ClientBuilder().tls(config, engineFactory)
+    assert(client.params[Transport.ClientSsl].sslClientConfiguration == Some(config))
+    assert(client.params[SslClientEngineFactory.Param].factory == engineFactory)
+  }
 
-        val key = Seq(m.name, "codec_connection_preparation_latency_ms")
-        val stat = m.statsReceiver.stats.get(key).get
-        stat.head must be_==(500.0f)
-      }
-    }
-*/
+  test("ClientBuilder sets SSL/TLS configuration, verifier") {
+    val client = ClientBuilder().tls(config, sessionVerifier)
+    assert(client.params[Transport.ClientSsl].sslClientConfiguration == Some(config))
+    assert(client.params[SslClientSessionVerifier.Param].verifier == sessionVerifier)
+  }
+
+  test("ClientBuilder sets SSL/TLS configuration, engine factory, verifier") {
+    val client = ClientBuilder().tls(config, engineFactory, sessionVerifier)
+    assert(client.params[Transport.ClientSsl].sslClientConfiguration == Some(config))
+    assert(client.params[SslClientEngineFactory.Param].factory == engineFactory)
+    assert(client.params[SslClientSessionVerifier.Param].verifier == sessionVerifier)
+  }
 }

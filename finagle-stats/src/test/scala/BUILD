@@ -1,9 +1,14 @@
-junit_tests(name='scala',
+junit_tests(
   dependencies=[
-    '3rdparty:junit',
-    '3rdparty:scalatest',
-    '3rdparty/jvm/com/twitter/common:metrics',
-    'finagle/finagle-stats'
+    '3rdparty/jvm/junit',
+    '3rdparty/jvm/org/scalacheck',
+    '3rdparty/jvm/org/scalatest',
+    'finagle/finagle-http/src/main/scala:scala',
+    'finagle/finagle-stats/src/main/scala',
+    'util/util-app/src/main/scala:scala',
+    'util/util-core/src/main/scala:scala',
+    'util/util-stats/src/main/scala:scala',
   ],
+  fatal_warnings=True,
   sources=rglobs('*.scala')
 )

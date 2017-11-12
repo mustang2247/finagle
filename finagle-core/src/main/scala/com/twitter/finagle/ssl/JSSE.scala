@@ -1,10 +1,8 @@
 package com.twitter.finagle.ssl
 
 import java.util.logging.Logger
-import java.security.cert.X509Certificate
-import javax.net.ssl._
-
-import collection.mutable.{Map => MutableMap}
+import javax.net.ssl.{SSLContext, TrustManager}
+import scala.collection.mutable.{Map => MutableMap}
 
 /*
  * Creates JSSE SSLEngines on behalf of the Ssl singleton
@@ -39,15 +37,14 @@ object JSSE {
   ): Option[Engine] = {
     def makeContext: SSLContext = {
       val context = SSLContext.getInstance(protocol)
-      val kms = PEMEncodedKeyManager(
-        certificatePath,
-        keyPath,
-        caCertPath)
+      val kms = PEMEncodedKeyManager(certificatePath, keyPath, caCertPath)
       context.init(kms, null, null)
 
-      log.finest("JSSE context instantiated for certificate '%s'".format(
-        certificatePath
-      ))
+      log.finest(
+        "JSSE context instantiated for certificate '%s'".format(
+          certificatePath
+        )
+      )
 
       context
     }
@@ -80,8 +77,8 @@ object JSSE {
    * Get a client from the given Context
    */
   def client(ctx: SSLContext): Engine = {
-    val sslEngine = ctx.createSSLEngine();
-    sslEngine.setUseClientMode(true);
+    val sslEngine = ctx.createSSLEngine()
+    sslEngine.setUseClientMode(true)
     new Engine(sslEngine)
   }
 
@@ -89,8 +86,8 @@ object JSSE {
    * Get a client from the given Context
    */
   def client(ctx: SSLContext, host: String, port: Int): Engine = {
-    val sslEngine = ctx.createSSLEngine(host, port);
-    sslEngine.setUseClientMode(true);
+    val sslEngine = ctx.createSSLEngine(host, port)
+    sslEngine.setUseClientMode(true)
     new Engine(sslEngine)
   }
 
@@ -129,19 +126,4 @@ object JSSE {
    */
   private[this] def trustAllCertificates(): Array[TrustManager] =
     Array(new IgnorantTrustManager)
-
-  /**
-   * A trust manager that does not validate anything
-   */
-  private[this] class IgnorantTrustManager extends X509TrustManager {
-    def getAcceptedIssuers(): Array[X509Certificate] = new Array[X509Certificate](0)
-
-    def checkClientTrusted(certs: Array[X509Certificate], authType: String) {
-      // Do nothing.
-    }
-
-    def checkServerTrusted(certs: Array[X509Certificate], authType: String) {
-      // Do nothing.
-    }
-  }
 }

@@ -1,17 +1,17 @@
 package com.twitter.finagle.zookeeper
 
 import com.google.common.collect.ImmutableSet
-import com.twitter.common.net.pool.DynamicHostSet
-import com.twitter.common.net.pool.DynamicHostSet.MonitorException
-import com.twitter.common.zookeeper.{ServerSet, ServerSetImpl}
+import com.twitter.finagle.common.net.pool.DynamicHostSet
+import com.twitter.finagle.common.net.pool.DynamicHostSet.MonitorException
+import com.twitter.finagle.common.zookeeper.{ServerSet, ServerSetImpl}
 import com.twitter.concurrent.{Broker, Offer}
 import com.twitter.finagle.addr.StabilizingAddr
 import com.twitter.finagle.stats.DefaultStatsReceiver
-import com.twitter.finagle.{Group, Resolver, Addr}
+import com.twitter.finagle.{Address, Group, Resolver, Addr}
 import com.twitter.thrift.Endpoint
 import com.twitter.thrift.ServiceInstance
 import com.twitter.util.Var
-import java.net.{InetSocketAddress, SocketAddress}
+import java.net.InetSocketAddress
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import java.util.logging.{Level, Logger}
@@ -25,8 +25,7 @@ class ZkResolverException(msg: String) extends Exception(msg)
 // Note: this is still used by finagle-memcached.
 private[finagle] class ZkGroup(serverSet: ServerSet, path: String)
     extends Thread("ZkGroup(%s)".format(path))
-    with Group[ServiceInstance]
-{
+    with Group[ServiceInstance] {
   setDaemon(true)
   start()
 
@@ -41,9 +40,9 @@ private[finagle] class ZkGroup(serverSet: ServerSet, path: String)
   }
 }
 
-
 private class ZkOffer(serverSet: ServerSet, path: String)
-    extends Thread("ZkOffer(%s)".format(path)) with Offer[Set[ServiceInstance]] {
+    extends Thread("ZkOffer(%s)".format(path))
+    with Offer[Set[ServiceInstance]] {
   setDaemon(true)
   start()
 
@@ -62,15 +61,18 @@ private class ZkOffer(serverSet: ServerSet, path: String)
         // There are certain path permission checks in the serverset library
         // that can cause exceptions here. We'll send an empty set (which
         // becomes a negative resolution).
-        log.log(Level.WARNING, "Exception when trying to watch a ServerSet! " +
-          "Returning negative resolution.", exc)
+        log.log(
+          Level.WARNING,
+          "Exception when trying to watch a ServerSet! " +
+            "Returning negative resolution.",
+          exc
+        )
         inbound !! Set.empty
     }
   }
 
   def prepare() = inbound.recv.prepare()
 }
-
 
 class ZkResolver(factory: ZkClientFactory) extends Resolver {
   val scheme = "zk"
@@ -84,17 +86,19 @@ class ZkResolver(factory: ZkClientFactory) extends Resolver {
   def this() = this(DefaultZkClientFactory)
 
   def resolve(
-      zkHosts: Set[InetSocketAddress],
-      path: String,
-      endpoint: Option[String] = None,
-      shardId: Option[Int] = None): Var[Addr] =
+    zkHosts: Set[InetSocketAddress],
+    path: String,
+    endpoint: Option[String] = None,
+    shardId: Option[Int] = None
+  ): Var[Addr] =
     synchronized {
       cache.getOrElseUpdate(
         (zkHosts, path, endpoint, shardId),
-        newVar(zkHosts, path, newToSocketAddrs(endpoint, shardId)))
+        newVar(zkHosts, path, newToAddresses(endpoint, shardId))
+      )
     }
 
-  private def newToSocketAddrs(endpoint: Option[String], shardId: Option[Int]) = {
+  private def newToAddresses(endpoint: Option[String], shardId: Option[Int]) = {
 
     val getEndpoint: PartialFunction[ServiceInstance, Endpoint] = endpoint match {
       case Some(epname) => {
@@ -113,21 +117,22 @@ class ZkResolver(factory: ZkClientFactory) extends Resolver {
       case None => { case x => x }
     }
 
-    val toSocketAddr: Endpoint => SocketAddress = (ep: Endpoint) =>
-      new InetSocketAddress(ep.getHost, ep.getPort)
+    val toAddress: Endpoint => Address = (ep: Endpoint) => Address(ep.getHost, ep.getPort)
 
     (insts: Set[ServiceInstance]) =>
-      insts.collect(filterShardId).collect(getEndpoint).map(toSocketAddr)
+      insts.collect(filterShardId).collect(getEndpoint).map(toAddress)
   }
 
   private def newVar(
-      zkHosts: Set[InetSocketAddress],
-      path: String, toSocketAddrs: Set[ServiceInstance] => Set[SocketAddress]) = {
+    zkHosts: Set[InetSocketAddress],
+    path: String,
+    toAddresses: Set[ServiceInstance] => Set[Address]
+  ) = {
 
     val (zkClient, zkHealthHandler) = factory.get(zkHosts)
     val zkOffer = new ZkOffer(new ServerSetImpl(zkClient, path), path)
     val addrOffer = zkOffer map { newSet =>
-      val sockaddrs = toSocketAddrs(newSet)
+      val sockaddrs = toAddresses(newSet)
       if (sockaddrs.nonEmpty) Addr.Bound(sockaddrs)
       else Addr.Neg
     }
@@ -136,7 +141,8 @@ class ZkResolver(factory: ZkClientFactory) extends Resolver {
       addrOffer,
       zkHealthHandler,
       factory.sessionTimeout,
-      DefaultStatsReceiver.scope("zkGroup"))
+      DefaultStatsReceiver.scope("zkGroup")
+    )
 
     val v = Var[Addr](Addr.Pending)
     stable foreach { newAddr =>
@@ -149,8 +155,7 @@ class ZkResolver(factory: ZkClientFactory) extends Resolver {
   private[this] def zkHosts(hosts: String) = {
     val zkHosts = factory.hostSet(hosts)
     if (zkHosts.isEmpty) {
-      throw new ZkResolverException(
-        "ZK client address \"%s\" resolves to nothing".format(hosts))
+      throw new ZkResolverException("ZK client address \"%s\" resolves to nothing".format(hosts))
     }
     zkHosts
   }

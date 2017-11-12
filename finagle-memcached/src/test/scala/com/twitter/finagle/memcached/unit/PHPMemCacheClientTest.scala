@@ -1,41 +1,48 @@
 package com.twitter.finagle.memcached.unit
 
+import com.twitter.conversions.time._
 import com.twitter.finagle.memcached._
 import com.twitter.hashing.KeyHasher
-import org.junit.runner.RunWith
-import org.mockito.Mockito.verify
+import com.twitter.util.{Await, Future}
+import org.mockito.Matchers.any
+import org.mockito.Mockito.{verify, when}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class PHPMemCacheClientTest extends FunSuite with MockitoSugar {
 
   class Context {
-    val client1 = mock[Client]
-    val client2 = mock[Client]
-    val client3 = mock[Client]
-    val phpMemCacheClient = new PHPMemCacheClient(Array(client1, client2, client3), KeyHasher.FNV1_32)
+    private def newClient(): Client = {
+      val c = mock[Client]
+      when(c.close(any())).thenReturn(Future.Done)
+      c
+    }
+
+    val client1 = newClient()
+    val client2 = newClient()
+    val client3 = newClient()
+    val phpMemCacheClient =
+      new PHPMemCacheClient(Array(client1, client2, client3), KeyHasher.FNV1_32)
   }
 
   test("pick the correct node") {
     val context = new Context
     import context._
 
-    assert(phpMemCacheClient.clientOf("apple")    === (client3))
-    assert(phpMemCacheClient.clientOf("banana")   === (client1))
-    assert(phpMemCacheClient.clientOf("cow")      === (client3))
-    assert(phpMemCacheClient.clientOf("dog")      === (client2))
-    assert(phpMemCacheClient.clientOf("elephant") === (client2))
+    assert(phpMemCacheClient.clientOf("apple") == (client3))
+    assert(phpMemCacheClient.clientOf("banana") == (client1))
+    assert(phpMemCacheClient.clientOf("cow") == (client3))
+    assert(phpMemCacheClient.clientOf("dog") == (client2))
+    assert(phpMemCacheClient.clientOf("elephant") == (client2))
   }
 
   test("release") {
     val context = new Context
     import context._
 
-    phpMemCacheClient.release()
-    verify(client1).release()
-    verify(client2).release()
-    verify(client3).release()
+    Await.result(phpMemCacheClient.close(), 5.seconds)
+    verify(client1).close(any())
+    verify(client2).close(any())
+    verify(client3).close(any())
   }
 }

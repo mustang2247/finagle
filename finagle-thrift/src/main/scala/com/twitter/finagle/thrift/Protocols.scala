@@ -1,14 +1,19 @@
 package com.twitter.finagle.thrift
 
 import com.google.common.base.Charsets
-import com.twitter.finagle.stats.{NullStatsReceiver, Counter, DefaultStatsReceiver, StatsReceiver}
+import com.twitter.finagle.stats.{Counter, DefaultStatsReceiver, StatsReceiver}
 import com.twitter.logging.Logger
-import com.twitter.util.NonFatal
 import java.nio.{ByteBuffer, CharBuffer}
-import java.nio.charset.{CoderResult, CharsetEncoder}
+import java.nio.charset.{CharsetEncoder, CoderResult, CodingErrorAction}
 import java.security.{PrivilegedExceptionAction, AccessController}
-import org.apache.thrift.protocol.{TProtocol, TProtocolFactory, TBinaryProtocol}
+import org.apache.thrift.protocol.{
+  TMultiplexedProtocol,
+  TProtocol,
+  TProtocolFactory,
+  TBinaryProtocol
+}
 import org.apache.thrift.transport.TTransport
+import scala.util.control.NonFatal
 
 object Protocols {
 
@@ -42,7 +47,15 @@ object Protocols {
 
   private val unsafe: Option[sun.misc.Unsafe] = Option(getUnsafe)
 
-  private[this] def optimizedBinarySupported: Boolean = unsafe.isDefined
+  // JDK9 Strings are no longer backed by Array[Char] - http://openjdk.java.net/jeps/254
+  private val StringsBackedByCharArray = try {
+    // Versioning changes between 8 and 9 - http://openjdk.java.net/jeps/223
+    System.getProperty("java.specification.version").replace("1.", "").toInt < 9
+  } catch {
+    case _: Throwable => false
+  }
+
+  private[this] def optimizedBinarySupported: Boolean = unsafe.isDefined && StringsBackedByCharArray
 
   /**
    * Returns a `TProtocolFactory` that creates `TProtocol`s that
@@ -59,12 +72,11 @@ object Protocols {
     } else {
       // Factories are created rarely while the creation of their TProtocol's
       // is a common event. Minimize counter creation to just once per Factory.
-      val fastEncodeFailed = statsReceiver.counter("fast_encode_failed")
       val largerThanTlOutBuffer = statsReceiver.counter("larger_than_threadlocal_out_buffer")
       new TProtocolFactory {
         override def getProtocol(trans: TTransport): TProtocol = {
-          val proto = new TFinagleBinaryProtocol(
-            trans, fastEncodeFailed, largerThanTlOutBuffer, strictRead, strictWrite)
+          val proto =
+            new TFinagleBinaryProtocol(trans, largerThanTlOutBuffer, strictRead, strictWrite)
           if (readLength != 0) {
             proto.setReadLength(readLength)
           }
@@ -78,49 +90,68 @@ object Protocols {
     binaryFactory(statsReceiver = statsReceiver)
   }
 
+  def multiplex(serviceName: String, protocolFactory: TProtocolFactory): TProtocolFactory = {
+    new TProtocolFactory {
+      def getProtocol(transport: TTransport) = {
+        new TMultiplexedProtocol(protocolFactory.getProtocol(transport), serviceName)
+      }
+    }
+  }
+
   // Visible for testing purposes.
   private[thrift] object TFinagleBinaryProtocol {
     // zero-length strings are written to the wire as an i32 of its length, which is 0
     private val EmptyStringInBytes = Array[Byte](0, 0, 0, 0)
 
-    // assume that most of our strings are mostly single byte utf8
-    private val MultiByteMultiplierEstimate = 1.3f
+    // sun.nio.cs.UTF_8.Encoder.maxBytesPerChar because
+    // ArrayEncoder.encode does not check for overflow
+    private val MultiByteMultiplierEstimate = 3.0f
 
     /** Only valid if unsafe is defined */
-    private val StringValueOffset: Long = unsafe.map {
-      _.objectFieldOffset(classOf[String].getDeclaredField("value"))
-    }.getOrElse(Long.MinValue)
+    private val StringValueOffset: Long = unsafe
+      .map {
+        _.objectFieldOffset(classOf[String].getDeclaredField("value"))
+      }
+      .getOrElse(Long.MinValue)
 
     /**
      * Note, some versions of the JDK's define `String.offset`,
      * while others do not and always use 0.
      */
-    private val OffsetValueOffset: Long = unsafe.map { u =>
-      try {
-        u.objectFieldOffset(classOf[String].getDeclaredField("offset"))
-      } catch {
-        case NonFatal(_) => Long.MinValue
+    private val OffsetValueOffset: Long = unsafe
+      .map { u =>
+        try {
+          u.objectFieldOffset(classOf[String].getDeclaredField("offset"))
+        } catch {
+          case NonFatal(_) => Long.MinValue
+        }
       }
-    }.getOrElse(Long.MinValue)
+      .getOrElse(Long.MinValue)
 
     /**
      * Note, some versions of the JDK's define `String.count`,
      * while others do not and always use `value.length`.
      */
-    private val CountValueOffset: Long = unsafe.map { u =>
-      try {
-        u.objectFieldOffset(classOf[String].getDeclaredField("count"))
-      } catch {
-        case NonFatal(_) => Long.MinValue
+    private val CountValueOffset: Long = unsafe
+      .map { u =>
+        try {
+          u.objectFieldOffset(classOf[String].getDeclaredField("count"))
+        } catch {
+          case NonFatal(_) => Long.MinValue
+        }
       }
-    }.getOrElse(Long.MinValue)
+      .getOrElse(Long.MinValue)
 
     private val charsetEncoder = new ThreadLocal[CharsetEncoder] {
-      override def initialValue() = Charsets.UTF_8.newEncoder()
+      override def initialValue() =
+        Charsets.UTF_8
+          .newEncoder()
+          .onMalformedInput(CodingErrorAction.REPLACE)
+          .onUnmappableCharacter(CodingErrorAction.REPLACE)
     }
 
     // Visible for testing purposes
-    private[thrift] val OutBufferSize = 4096
+    private[thrift] val OutBufferSize = 16384
 
     private val outByteBuffer = new ThreadLocal[ByteBuffer] {
       override def initialValue() = ByteBuffer.allocate(OutBufferSize)
@@ -137,16 +168,11 @@ object Protocols {
    * Visible for testing purposes.
    */
   private[thrift] class TFinagleBinaryProtocol(
-      trans: TTransport,
-      fastEncodeFailed: Counter,
-      largerThanTlOutBuffer: Counter,
-      strictRead: Boolean = false,
-      strictWrite: Boolean = true)
-    extends TBinaryProtocol(
-      trans,
-      strictRead,
-      strictWrite)
-  {
+    trans: TTransport,
+    largerThanTlOutBuffer: Counter,
+    strictRead: Boolean = false,
+    strictWrite: Boolean = true
+  ) extends TBinaryProtocol(trans, strictRead, strictWrite) {
     import TFinagleBinaryProtocol._
 
     override def writeString(str: String) {
@@ -160,13 +186,16 @@ object Protocols {
       // https://github.com/nitsanw/jmh-samples/blob/master/src/main/java/psy/lob/saw/utf8/CustomUtf8Encoder.java
       val u = unsafe.get
       val chars = u.getObject(str, StringValueOffset).asInstanceOf[Array[Char]]
-      val offset = if (OffsetValueOffset == Long.MinValue) 0 else {
-        u.getInt(str, OffsetValueOffset)
-      }
-      val count = if (CountValueOffset == Long.MinValue) chars.length else {
-        u.getInt(str, CountValueOffset)
-      }
-      val charBuffer = CharBuffer.wrap(chars, offset, count)
+      val offset =
+        if (OffsetValueOffset == Long.MinValue) 0
+        else {
+          u.getInt(str, OffsetValueOffset)
+        }
+      val count =
+        if (CountValueOffset == Long.MinValue) chars.length
+        else {
+          u.getInt(str, CountValueOffset)
+        }
 
       val out = if (count * MultiByteMultiplierEstimate <= OutBufferSize) {
         val o = outByteBuffer.get()
@@ -180,14 +209,17 @@ object Protocols {
       val csEncoder = charsetEncoder.get()
       csEncoder.reset()
 
-      val result = csEncoder.encode(charBuffer, out, true)
-      if (result != CoderResult.UNDERFLOW) {
-        fastEncodeFailed.incr()
-        super.writeString(str)
-      } else {
-        writeI32(out.position())
-        trans.write(out.array(), 0, out.position())
+      csEncoder match {
+        case arrayEncoder: sun.nio.cs.ArrayEncoder =>
+          val blen = arrayEncoder.encode(chars, offset, count, out.array())
+          out.position(blen)
+        case _ =>
+          val charBuffer = CharBuffer.wrap(chars, offset, count)
+          csEncoder.encode(charBuffer, out, true /* endOfInput */ ) != CoderResult.UNDERFLOW
       }
+
+      writeI32(out.position())
+      trans.write(out.array(), 0, out.position())
     }
 
     // Note: libthrift 0.5.0 has a bug when operating on ByteBuffer's with a non-zero arrayOffset.

@@ -1,20 +1,29 @@
 package com.twitter.finagle.client
 
-import com.twitter.finagle.socks.SocksProxyFlags
-import com.twitter.finagle.Stack
-import com.twitter.finagle.transport.Transport
-import com.twitter.util.Duration
-import com.twitter.util.Future
-import java.net.SocketAddress
+import com.twitter.finagle.socks._
+import com.twitter.finagle.{Address, Stack}
+import com.twitter.finagle.transport.{Transport, TransportContext}
+import com.twitter.util.{Duration, Future}
+import java.net.{InetSocketAddress, SocketAddress}
 
 /**
- * Transporters are simple functions from a `SocketAddress` to a
- * `Future[Transport[In, Out]]`. They represent a transport layer session from a
- * client to a server. Transporters are symmetric to the server-side
- * [[com.twitter.finagle.server.Listener]].
+ * Transporters construct a `Future[Transport[In, Out, Context]]`.
+ *
+ * There is one Transporter assigned per remote peer.  Transporters are
+ * symmetric to the server-side [[com.twitter.finagle.server.Listener]], except
+ * that it isn't shared across remote peers..
  */
-trait Transporter[In, Out] {
-  def apply(addr: SocketAddress): Future[Transport[In, Out]]
+trait Transporter[In, Out, Ctx <: TransportContext] {
+  def apply(): Future[
+    Transport[In, Out] {
+      type Context <: Ctx
+    }
+  ]
+
+  /**
+   * The address of the remote peer that this `Transporter` connects to.
+   */
+  def remoteAddress: SocketAddress
 }
 
 /**
@@ -29,51 +38,93 @@ object Transporter {
   /**
    * $param a `SocketAddress` that a `Transporter` connects to.
    */
-  case class EndpointAddr(addr: SocketAddress)
-  implicit object EndpointAddr extends Stack.Param[EndpointAddr] {
-    private[this] val noAddr = new SocketAddress {
-      override def toString = "noaddr"
-    }
-    val default = EndpointAddr(noAddr)
+  case class EndpointAddr(addr: Address) {
+    def mk(): (EndpointAddr, Stack.Param[EndpointAddr]) =
+      (this, EndpointAddr.param)
+  }
+  object EndpointAddr {
+    implicit val param =
+      Stack.Param(EndpointAddr(Address.failing))
   }
 
   /**
    * $param the connect timeout of a `Transporter`.
    *
-   * @param howlong A maximum amount of time a transport
-   * is allowed to spend connecting.
+   * @param howlong Maximum amount of time a transport is allowed to
+   *                spend connecting. Must be non-negative.
    */
-  case class ConnectTimeout(howlong: Duration)
-  implicit object ConnectTimeout extends Stack.Param[ConnectTimeout] {
-    val default = ConnectTimeout(1.second)
-  }
+  case class ConnectTimeout(howlong: Duration) {
+    if (howlong < Duration.Zero)
+      throw new IllegalArgumentException(s"howlong must be non-negative: saw $howlong")
 
-  /**
-   * $param hostname verification, if TLS is enabled.
-   * @see [[com.twitter.finagle.transport.Transport#TLSEngine]]
-   */
-  case class TLSHostname(hostname: Option[String])
-  implicit object TLSHostname extends Stack.Param[TLSHostname] {
-    val default = TLSHostname(None)
+    def mk(): (ConnectTimeout, Stack.Param[ConnectTimeout]) =
+      (this, ConnectTimeout.param)
+  }
+  object ConnectTimeout {
+    implicit val param = Stack.Param(ConnectTimeout(1.second))
   }
 
   /**
    * $param a SocksProxy as the endpoint for a `Transporter`.
    */
-  case class SocksProxy(sa: Option[SocketAddress], credentials: Option[(String, String)])
-  implicit object SocksProxy extends Stack.Param[SocksProxy] {
-    val default = SocksProxy(
-      SocksProxyFlags.socksProxy,
-      SocksProxyFlags.socksUsernameAndPassword
-    )
+  case class SocksProxy(sa: Option[SocketAddress], credentials: Option[(String, String)]) {
+    def mk(): (SocksProxy, Stack.Param[SocksProxy]) =
+      (this, SocksProxy.param)
+  }
+  object SocksProxy {
+
+    private[this] def socksProxy: Option[SocketAddress] =
+      (socksProxyHost.get, socksProxyPort.get) match {
+        case (Some(host), Some(port)) => Some(new InetSocketAddress(host, port))
+        case _ => None
+      }
+
+    private[this] def socksUsernameAndPassword: Option[(String, String)] =
+      (socksUsernameFlag.get, socksPasswordFlag.get) match {
+        case (Some(username), Some(password)) => Some((username, password))
+        case _ => None
+      }
+
+    implicit val param = Stack.Param(SocksProxy(socksProxy, socksUsernameAndPassword))
   }
 
   /**
    * $param a HttpProxy as the endpoint for a `Transporter`.
    * @see http://www.w3.org/Protocols/rfc2616/rfc2616-sec9.html#9.9
    */
-  case class HttpProxy(sa: Option[SocketAddress])
-  implicit object HttpProxy extends Stack.Param[HttpProxy] {
-    val default = HttpProxy(None)
+  case class HttpProxy(sa: Option[SocketAddress], credentials: Option[Credentials]) {
+    def mk(): (HttpProxy, Stack.Param[HttpProxy]) =
+      (this, HttpProxy.param)
+
+    def this(sa: Option[SocketAddress]) = this(sa, None)
   }
+  object HttpProxy {
+    implicit val param = Stack.Param(HttpProxy(None, None))
+  }
+
+  case class HttpProxyTo(hostAndCredentials: Option[(String, Option[Credentials])])
+  object HttpProxyTo {
+    implicit val param = Stack.Param(HttpProxyTo(None))
+  }
+
+  /**
+   * This class wraps the username, password that we use for http proxy auth
+   */
+  case class Credentials(username: String, password: String)
+
+  /**
+   * Configures the traffic class to be used by clients.
+   *
+   * @param value `None` indicates no class specified. When `Some`, is an opaque
+   * identifier and its meaning and interpretation are implementation specific.
+   * Currently used to configure [[java.net.StandardSocketOptions.IP_TOS]].
+   */
+  case class TrafficClass(value: Option[Int]) {
+    def mk(): (TrafficClass, Stack.Param[TrafficClass]) =
+      (this, TrafficClass.param)
+  }
+  object TrafficClass {
+    implicit val param = Stack.Param(TrafficClass(None))
+  }
+
 }

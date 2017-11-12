@@ -1,40 +1,47 @@
 EXTERNAL_SOURCES = [
-  'com/twitter/finagle/memcached/integration/ExternalMemcached.scala',
-  'com/twitter/finagle/memcached/integration/InProcessMemcached.scala'
+  'com/twitter/finagle/memcached/integration/external/ExternalMemcached.scala',
+  'com/twitter/finagle/memcached/integration/external/InProcessMemcached.scala'
 ]
 
 scala_library(name='external',
+  provides = scala_artifact(
+    org = 'com.twitter',
+    name = 'finagle-memcached-testutils',
+    repo = artifactory,
+  ),
   dependencies=[
-    '3rdparty:netty',
-    'finagle/finagle-core',
-    'finagle/finagle-memcached',
+    'finagle/finagle-core/src/main/scala:scala',
+    'finagle/finagle-memcached/src/main/scala:scala',
     'util/util-collection',
-    'util/util-core'
+    'util/util-core/src/main/scala:scala',
   ],
-  sources=EXTERNAL_SOURCES
+  sources=EXTERNAL_SOURCES,
 )
 
-junit_tests(name='scala',
+junit_tests(
   dependencies=[
     ':external',
-    '3rdparty:junit',
-    '3rdparty:mockito-all',
-    '3rdparty:netty',
-    '3rdparty:scalatest',
-    '3rdparty:specs',
-    '3rdparty/jvm/com/twitter/common:application-action',
-    '3rdparty/jvm/com/twitter/common:service-thrift',
-    '3rdparty/jvm/com/twitter/common:zookeeper-testing',
-    '3rdparty/jvm/com/twitter/common/zookeeper:client',
-    '3rdparty/jvm/com/twitter/common/zookeeper:server-set',
-    'finagle/finagle-core',
-    'finagle/finagle-memcached',
+    '3rdparty/jvm/com/fasterxml/jackson/core:jackson-databind',
+    '3rdparty/jvm/com/fasterxml/jackson/module:jackson-module-scala',
+    '3rdparty/jvm/io/netty',
+    '3rdparty/jvm/junit',
+    '3rdparty/jvm/org/apache/zookeeper:zookeeper-server',
+    '3rdparty/jvm/org/mockito:mockito-all',
+    '3rdparty/jvm/org/scalacheck',
+    '3rdparty/jvm/org/scalatest',
+    'finagle/finagle-core/src/main/scala:scala',
+    'finagle/finagle-core/src/test/scala:scala',
+    'finagle/finagle-memcached/src/main/scala:scala',
+    'finagle/finagle-memcached/src/test/resources',
     'finagle/finagle-serversets',
-    'util/util-core',
-    'util/util-hashing'
+    'finagle/finagle-toggle/src/main/scala:scala',
+    'util/util-collection/src/main/scala:scala',
+    'util/util-core/src/main/scala:scala',
+    'util/util-hashing',
+    'util/util-registry/src/main/scala:scala',
+    'util/util-stats/src/main/scala:scala',
+    'util/util-zk-test',
   ],
-  sources=rglobs('*.scala') - EXTERNAL_SOURCES,
-  resources=[
-    'finagle/finagle-memcached/src/test/resources'
-  ]
+  fatal_warnings=True,
+  sources=rglobs('*.scala', exclude=[EXTERNAL_SOURCES]),
 )

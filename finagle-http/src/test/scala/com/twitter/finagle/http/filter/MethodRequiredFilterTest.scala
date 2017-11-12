@@ -13,13 +13,15 @@ class MethodRequiredFilterTest extends FunSuite {
   val dummyService = new Service[Request, Response] {
     def apply(request: Request): Future[Response] = {
       val response = request.response
-      request.params.get("exception").foreach(e => {
-        response.write("exception thrown")
-        throw new Exception()
-      })
+      request.params
+        .get("exception")
+        .foreach(e => {
+          response.write("exception thrown")
+          throw new Exception()
+        })
       request.params.get("code") match {
         case Some(code) => response.statusCode = code.toInt
-        case None       => response.status     = Status.Ok
+        case None => response.status = Status.Ok
       }
       Future.value(response)
     }
@@ -31,14 +33,14 @@ class MethodRequiredFilterTest extends FunSuite {
     val request = Request()
     request.method = Method.Get
     val response = Await.result(filter(request, dummyService))
-    assert(response.status === Status.MethodNotAllowed)
-    assert(response.headers.get("Allow") === "POST")
+    assert(response.status == Status.MethodNotAllowed)
+    assert(response.headerMap.get("Allow") == Some("POST"))
   }
 
   test("return 200 when allowed method is used") {
     val request = Request()
     request.method = Method.Post
     val response = Await.result(filter(request, dummyService))
-    assert(response.status === Status.Ok)
+    assert(response.status == Status.Ok)
   }
 }

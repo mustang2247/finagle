@@ -1,10 +1,9 @@
 package com.twitter.finagle.service
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.MockTimer
 import com.twitter.finagle.stats.{Counter, StatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.{Service, Status}
-import com.twitter.util.{Future, Time, Promise, Return, Duration, Timer}
+import com.twitter.util.{Future, Time, MockTimer, Promise, Return, Duration, Timer}
 import org.junit.runner.RunWith
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, verify, when}
@@ -22,11 +21,8 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     maxIdleTime: Option[Duration],
     maxLifeTime: Option[Duration],
     timer: Timer,
-    stats: StatsReceiver)
-      extends ExpiringService[Req, Rep](
-        self, maxIdleTime, maxLifeTime,
-        timer, stats)
-  {
+    stats: StatsReceiver
+  ) extends ExpiringService[Req, Rep](self, maxIdleTime, maxLifeTime, timer, stats) {
     def onExpire() { self.close() }
   }
 
@@ -52,10 +48,15 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
 
       val count = timer.tasks.size
       val service = new ReleasingExpiringService[Any, Any](
-        underlying, Some(10.seconds), Some(5.seconds), timer, NullStatsReceiver)
-      assert(timer.tasks.size === count + 2)
+        underlying,
+        Some(10.seconds),
+        Some(5.seconds),
+        timer,
+        NullStatsReceiver
+      )
+      assert(timer.tasks.size == count + 2)
       service.close()
-      assert(timer.tasks.size === count)
+      assert(timer.tasks.size == count)
     }
   }
 
@@ -63,7 +64,13 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     Time.withTimeAt(frozenNow) { timeControl =>
       val ctx = newCtx()
       import ctx._
-      val service = new ReleasingExpiringService[Any, Any](underlying, Some(10.seconds), None, timer, NullStatsReceiver)
+      val service = new ReleasingExpiringService[Any, Any](
+        underlying,
+        Some(10.seconds),
+        None,
+        timer,
+        NullStatsReceiver
+      )
       verify(underlying, never()).close(any[Time])
 
       timeControl.advance(10.seconds)
@@ -81,9 +88,15 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     Time.withTimeAt(frozenNow) { timeControl =>
       val ctx = newCtx()
       import ctx._
-      val service = new ReleasingExpiringService[Any, Any](underlying, Some(10.seconds), None, timer, NullStatsReceiver)
-      assert(timer.tasks.size === 1)
-      assert(timer.tasks.head.when === Time.now + 10.seconds)
+      val service = new ReleasingExpiringService[Any, Any](
+        underlying,
+        Some(10.seconds),
+        None,
+        timer,
+        NullStatsReceiver
+      )
+      assert(timer.tasks.size == 1)
+      assert(timer.tasks.head.when == Time.now + 10.seconds)
 
       timeControl.advance(10.seconds)
       timer.tick()
@@ -99,7 +112,8 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
       val ctx = newCtx()
       import ctx._
 
-      val service = new ReleasingExpiringService[Any, Any](underlying, Some(10.seconds), None, timer, stats)
+      val service =
+        new ReleasingExpiringService[Any, Any](underlying, Some(10.seconds), None, timer, stats)
       timeControl.advance(10.seconds)
       timer.tick()
       verify(idleCounter).incr()
@@ -111,8 +125,14 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     Time.withTimeAt(frozenNow) { timeControl =>
       val ctx = newCtx()
       import ctx._
-      val service = new ReleasingExpiringService[Any, Any](underlying, Some(10.seconds), None, timer, NullStatsReceiver)
-      assert(timer.tasks.size === 1)
+      val service = new ReleasingExpiringService[Any, Any](
+        underlying,
+        Some(10.seconds),
+        None,
+        timer,
+        NullStatsReceiver
+      )
+      assert(timer.tasks.size == 1)
 
       service(123)
       assert(timer.tasks.isEmpty)
@@ -123,8 +143,14 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     Time.withTimeAt(frozenNow) { timeControl =>
       val ctx = newCtx()
       import ctx._
-      val service = new ReleasingExpiringService[Any, Any](underlying, Some(10.seconds), None, timer, NullStatsReceiver)
-      assert(timer.tasks.size === 1)
+      val service = new ReleasingExpiringService[Any, Any](
+        underlying,
+        Some(10.seconds),
+        None,
+        timer,
+        NullStatsReceiver
+      )
+      assert(timer.tasks.size == 1)
 
       service(123)
       assert(timer.tasks.isEmpty)
@@ -134,7 +160,7 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
 
       assert(timer.tasks.isEmpty)
       promise() = Return(321)
-      assert(timer.tasks.size === 1)
+      assert(timer.tasks.size == 1)
 
       verify(underlying, never()).close(any[Time])
       timeControl.advance(10.seconds)
@@ -148,9 +174,15 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     Time.withTimeAt(frozenNow) { timeControl =>
       val ctx = newCtx()
       import ctx._
-      val service = new ReleasingExpiringService[Any, Any](underlying, None, Some(10.seconds), timer, NullStatsReceiver)
-      assert(timer.tasks.size === 1)
-      assert(timer.tasks.head.when === Time.now + 10.seconds)
+      val service = new ReleasingExpiringService[Any, Any](
+        underlying,
+        None,
+        Some(10.seconds),
+        timer,
+        NullStatsReceiver
+      )
+      assert(timer.tasks.size == 1)
+      assert(timer.tasks.head.when == Time.now + 10.seconds)
 
       timeControl.advance(10.seconds)
       timer.tick()
@@ -165,11 +197,17 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     Time.withTimeAt(frozenNow) { timeControl =>
       val ctx = newCtx()
       import ctx._
-      val service = new ReleasingExpiringService[Any, Any](underlying, None, Some(10.seconds), timer, NullStatsReceiver)
-      assert(timer.tasks.size === 1)
+      val service = new ReleasingExpiringService[Any, Any](
+        underlying,
+        None,
+        Some(10.seconds),
+        timer,
+        NullStatsReceiver
+      )
+      assert(timer.tasks.size == 1)
 
       service(123)
-      assert(timer.tasks.size === 1)
+      assert(timer.tasks.size == 1)
       assert(!timer.tasks.head.isCancelled)
     }
   }
@@ -180,9 +218,14 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
       import ctx._
 
       val service = new ReleasingExpiringService[Any, Any](
-        underlying, Some(10.seconds), Some(1.minute), timer, NullStatsReceiver)
-      assert(timer.tasks.size === 2)
-      assert(timer.tasks.head.when === Time.now + 10.seconds)
+        underlying,
+        Some(10.seconds),
+        Some(1.minute),
+        timer,
+        NullStatsReceiver
+      )
+      assert(timer.tasks.size == 2)
+      assert(timer.tasks.head.when == Time.now + 10.seconds)
 
       timeControl.advance(10.seconds)
       timer.tick()
@@ -197,22 +240,28 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     Time.withTimeAt(frozenNow) { timeControl =>
       val ctx = newCtx()
       import ctx._
-      val service = new ReleasingExpiringService[Any, Any](underlying, Some(10.seconds), Some(15.seconds), timer, stats)
-      assert(timer.tasks.size === 2)
+      val service = new ReleasingExpiringService[Any, Any](
+        underlying,
+        Some(10.seconds),
+        Some(15.seconds),
+        timer,
+        stats
+      )
+      assert(timer.tasks.size == 2)
       assert(timer.tasks.forall(!_.isCancelled))
 
       service(123)
-      assert(timer.tasks.size === 1)
-      assert(timer.tasks.head.isCancelled === false)
+      assert(timer.tasks.size == 1)
+      assert(timer.tasks.head.isCancelled == false)
 
       timeControl.advance(8.seconds)
       timer.tick()
 
-      assert(timer.tasks.size === 1)
-      assert(timer.tasks.head.isCancelled === false)
+      assert(timer.tasks.size == 1)
+      assert(timer.tasks.head.isCancelled == false)
 
       promise() = Return(321)
-      assert(timer.tasks.size === 2)
+      assert(timer.tasks.size == 2)
       assert(timer.tasks.forall(!_.isCancelled))
 
       verify(underlying, never()).close(any[Time])

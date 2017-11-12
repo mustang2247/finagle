@@ -37,9 +37,12 @@ object DefaultPool {
    * are queued when the connection concurrency exceeds the high
    * watermark.
    */
-  case class Param(low: Int, high: Int, bufferSize: Int, idleTime: Duration, maxWaiters: Int)
-  implicit object Param extends Stack.Param[Param] {
-    val default = Param(0, Int.MaxValue, 0, Duration.Top, Int.MaxValue)
+  case class Param(low: Int, high: Int, bufferSize: Int, idleTime: Duration, maxWaiters: Int) {
+    def mk(): (Param, Stack.Param[Param]) =
+      (this, Param.param)
+  }
+  object Param {
+    implicit val param = Stack.Param(Param(0, Int.MaxValue, 0, Duration.Top, Int.MaxValue))
   }
 
   /**
@@ -57,7 +60,8 @@ object DefaultPool {
       val parameters = Seq(
         implicitly[Stack.Param[Param]],
         implicitly[Stack.Param[param.Stats]],
-        implicitly[Stack.Param[param.Timer]])
+        implicitly[Stack.Param[param.Timer]]
+      )
       def make(prms: Stack.Params, next: Stack[ServiceFactory[Req, Rep]]) = {
         val Param(low, high, bufferSize, idleTime, maxWaiters) = prms[Param]
         val param.Stats(statsReceiver) = prms[param.Stats]
@@ -66,16 +70,24 @@ object DefaultPool {
         val stack = new StackBuilder[ServiceFactory[Req, Rep]](next)
 
         if (idleTime > 0.seconds && high > low) {
-          stack.push(Role.cachingPool, (sf: ServiceFactory[Req, Rep]) =>
-            new CachingPool(sf, high-low, idleTime, timer, statsReceiver))
+          stack.push(
+            Role.cachingPool,
+            (sf: ServiceFactory[Req, Rep]) =>
+              new CachingPool(sf, high - low, idleTime, timer, statsReceiver)
+          )
         }
 
-        stack.push(Role.watermarkPool, (sf: ServiceFactory[Req, Rep]) =>
-          new WatermarkPool(sf, low, high, statsReceiver, maxWaiters))
+        stack.push(
+          Role.watermarkPool,
+          (sf: ServiceFactory[Req, Rep]) =>
+            new WatermarkPool(sf, low, high, statsReceiver, maxWaiters)
+        )
 
         if (bufferSize > 0) {
-          stack.push(Role.bufferingPool, (sf: ServiceFactory[Req, Rep]) =>
-            new BufferingPool(sf, bufferSize))
+          stack.push(
+            Role.bufferingPool,
+            (sf: ServiceFactory[Req, Rep]) => new BufferingPool(sf, bufferSize)
+          )
         }
 
         stack.result
@@ -106,16 +118,17 @@ object DefaultPool {
  * watermark.
  */
 case class DefaultPool[Req, Rep](
-    low: Int = 0,
-    high: Int = Int.MaxValue,
-    bufferSize: Int = 0,
-    idleTime: Duration = Duration.Top,
-    maxWaiters: Int = Int.MaxValue,
-    timer: Timer = DefaultTimer.twitter
+  low: Int = 0,
+  high: Int = Int.MaxValue,
+  bufferSize: Int = 0,
+  idleTime: Duration = Duration.Top,
+  maxWaiters: Int = Int.MaxValue,
+  timer: Timer = DefaultTimer
 ) extends (StatsReceiver => Transformer[Req, Rep]) {
   def apply(statsReceiver: StatsReceiver) = inputFactory => {
     val factory =
-      if (idleTime <= 0.seconds || high <= low) inputFactory else
+      if (idleTime <= 0.seconds || high <= low) inputFactory
+      else
         new CachingPool(inputFactory, high - low, idleTime, timer, statsReceiver)
 
     // NB: WatermarkPool conceals the first "low" closes from CachingPool, so that

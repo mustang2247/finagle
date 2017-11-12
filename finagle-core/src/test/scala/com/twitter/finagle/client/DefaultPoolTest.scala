@@ -2,7 +2,7 @@ package com.twitter.finagle.client
 
 import com.twitter.finagle.{Status, ClientConnection, Service, ServiceFactory}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.util.{Await, Future, Time}
+import com.twitter.util.{Return, Await, Future, Time}
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
@@ -27,7 +27,7 @@ class DefaultPoolTest extends FunSuite {
       Future.Done
     }
 
-    override def status: Status = 
+    override def status: Status =
       if (closed) Status.Closed else Status.Open
   }
 
@@ -37,33 +37,37 @@ class DefaultPoolTest extends FunSuite {
     val factory = DefaultPool[Unit, Unit](2, 3)(sr)(underlying)
   }
 
-  test("DefaultPool should be able to maintain high - low connections in the " +
-    "pool, and low connection in watermark") {
+  test(
+    "DefaultPool should be able to maintain high - low connections in the " +
+      "pool, and low connection in watermark"
+  ) {
 
     new DefaultPoolHelper {
       val c1 = Await.result(factory())
-      assert(sr.gauges(Seq("pool_cached"))() === 0)
-      assert(sr.gauges(Seq("pool_size"))() === 1)
+      assert(sr.gauges(Seq("pool_cached"))() == 0)
+      assert(sr.gauges(Seq("pool_size"))() == 1)
       val c2 = Await.result(factory())
-      assert(sr.gauges(Seq("pool_cached"))() === 0)
-      assert(sr.gauges(Seq("pool_size"))() === 2)
+      assert(sr.gauges(Seq("pool_cached"))() == 0)
+      assert(sr.gauges(Seq("pool_size"))() == 2)
       val c3 = Await.result(factory())
-      assert(sr.gauges(Seq("pool_cached"))() === 0)
-      assert(sr.gauges(Seq("pool_size"))() === 3)
+      assert(sr.gauges(Seq("pool_cached"))() == 0)
+      assert(sr.gauges(Seq("pool_size"))() == 3)
       c1.close()
-      assert(sr.gauges(Seq("pool_cached"))() === 1)
-      assert(sr.gauges(Seq("pool_size"))() === 2)
+      assert(sr.gauges(Seq("pool_cached"))() == 1)
+      assert(sr.gauges(Seq("pool_size"))() == 2)
       c2.close()
-      assert(sr.gauges(Seq("pool_cached"))() === 1)
-      assert(sr.gauges(Seq("pool_size"))() === 2)
+      assert(sr.gauges(Seq("pool_cached"))() == 1)
+      assert(sr.gauges(Seq("pool_size"))() == 2)
       c3.close()
-      assert(sr.gauges(Seq("pool_cached"))() === 1)
-      assert(sr.gauges(Seq("pool_size"))() === 2)
+      assert(sr.gauges(Seq("pool_cached"))() == 1)
+      assert(sr.gauges(Seq("pool_size"))() == 2)
     }
   }
 
-  test("DefaultPool should be able to reuse connections after they have been " +
-    "released.") {
+  test(
+    "DefaultPool should be able to reuse connections after they have been " +
+      "released."
+  ) {
     new DefaultPoolHelper {
       val c1 = Await.result(factory())
       val c2 = Await.result(factory())
@@ -76,9 +80,9 @@ class DefaultPoolTest extends FunSuite {
       val c6 = Await.result(factory())
 
       // should not throw exceptions
-      assert(Await.result(c4(())) === ())
-      assert(Await.result(c5(())) === ())
-      assert(Await.result(c6(())) === ())
+      assert(Await.result(c4(()).liftToTry) == Return.Unit)
+      assert(Await.result(c5(()).liftToTry) == Return.Unit)
+      assert(Await.result(c6(()).liftToTry) == Return.Unit)
     }
   }
 }

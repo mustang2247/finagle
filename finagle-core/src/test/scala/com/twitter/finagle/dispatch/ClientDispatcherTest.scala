@@ -1,20 +1,26 @@
 package com.twitter.finagle.dispatch
 
+import com.twitter.conversions.time._
+import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.finagle.transport.Transport
+import com.twitter.finagle.{Failure, FailureFlags, WriteException}
+import com.twitter.util._
+import org.junit.runner.RunWith
+import org.mockito.Matchers._
+import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.junit.runner.RunWith
 import org.scalatest.mock.MockitoSugar
-import org.mockito.Mockito.{times, verify, when}
-import org.mockito.Matchers._
-import com.twitter.finagle.transport.Transport
-import com.twitter.util.{Throw, Return, Promise, Future}
-import com.twitter.finagle.{WriteException, Failure}
 
 @RunWith(classOf[JUnitRunner])
 class ClientDispatcherTest extends FunSuite with MockitoSugar {
   class DispatchHelper {
+    val closeP = new Promise[Exception]
+    val stats = new InMemoryStatsReceiver()
     val trans = mock[Transport[String, String]]
-    val disp = new SerialClientDispatcher[String, String](trans)
+    when(trans.onClose).thenReturn(closeP)
+
+    val disp = new SerialClientDispatcher[String, String](trans, stats)
   }
 
   test("ClientDispatcher should dispatch requests") {
@@ -30,7 +36,7 @@ class ClientDispatcherTest extends FunSuite with MockitoSugar {
 
     assert(!f.isDefined)
     p.setValue("ok: one")
-    assert(f.poll === Some(Return("ok: one")))
+    assert(f.poll == Some(Return("ok: one")))
   }
 
   test("ClientDispatcher should dispatch requests one-at-a-time") {
@@ -52,13 +58,13 @@ class ClientDispatcherTest extends FunSuite with MockitoSugar {
 
     when(trans.read()) thenReturn p1
     p0.setValue("ok: one")
-    assert(f0.poll === Some(Return("ok: one")))
+    assert(f0.poll == Some(Return("ok: one")))
     verify(trans, times(2)).write(any[String])
     verify(trans, times(2)).read()
 
     assert(!f1.isDefined)
     p1.setValue("ok: two")
-    assert(p1.poll === Some(Return("ok: two")))
+    assert(p1.poll == Some(Return("ok: two")))
   }
 
   test("ClientDispatcher should interrupt when close transport and cancel pending requests") {
@@ -78,7 +84,7 @@ class ClientDispatcherTest extends FunSuite with MockitoSugar {
     val intr = new Exception
     f0.raise(intr)
     verify(trans).close()
-    assert(f0.poll === Some(Throw(intr)))
+    assert(f0.poll == Some(Throw(intr)))
   }
 
   test("ClientDispatcher should interrupt when ignore pending") {
@@ -102,8 +108,8 @@ class ClientDispatcherTest extends FunSuite with MockitoSugar {
     assert(!f1.isDefined)
 
     p0.setValue("ok")
-    assert(f0.poll === Some(Return("ok")))
-    assert(f1.poll === Some(Throw(Failure.InterruptedBy(`intr`))))
+    assert(f0.poll == Some(Return("ok")))
+    assert(f1.poll == Some(Throw(Failure(intr, Failure.Interrupted))))
     verify(trans).write(any[String])
   }
 
@@ -120,7 +126,72 @@ class ClientDispatcherTest extends FunSuite with MockitoSugar {
 
     val result: Throwable = resultOpt.get.asInstanceOf[Throw[String]].e
     assert(result.isInstanceOf[WriteException])
-    assert(result.getCause === exc)
+    assert(result.getCause == exc)
   }
 
+  def assertGaugeSize(stats: InMemoryStatsReceiver, size: Int): Unit =
+    assert(stats.gauges(Seq("serial", "queue_size"))() == size)
+
+  test("ClientDispatcher queue_size gauge") {
+    val h = new DispatchHelper
+    import h._
+
+    assertGaugeSize(stats, 0)
+
+    val p = new Promise[String]()
+    when(trans.write(any[String])).thenReturn(Future.Done)
+    when(trans.read()).thenReturn(p)
+
+    disp("0")
+    assertGaugeSize(stats, 0) // 1 issued, but none pending
+
+    disp("1")
+    disp("2")
+    assertGaugeSize(stats, 2) // 1 issued, now 2 pending
+
+    p.setValue("done")
+    assertGaugeSize(stats, 0)
+  }
+
+  test("pending dispatches are failed on transport close") {
+    val h = new DispatchHelper
+    import h._
+
+    when(trans.write(any[String])).thenReturn(Future.never)
+    val (r1, r2, r3) = (disp("0"), disp("1"), disp("2"))
+
+    // first request receives the permit, the write never returns
+    // subsequent requests are queued.
+    assertGaugeSize(stats, 2)
+
+    closeP.setException(new Exception("fin"))
+
+    // pending requests are failed
+    val e1 = intercept[Failure] { (Await.result(r2, 2.seconds)) }
+    val e2 = intercept[Failure] { (Await.result(r3, 2.seconds)) }
+
+    assert(e1.getMessage == "fin")
+    assert(FailureFlags.isFlagged(FailureFlags.Retryable)(e1))
+    assert(e2.getMessage == "fin")
+    assert(FailureFlags.isFlagged(FailureFlags.Retryable)(e2))
+  }
+
+  test("dispatcher with a closed transport fails fast") {
+    val h = new DispatchHelper
+    import h._
+
+    closeP.setException(new Exception("fin"))
+
+    Seq(disp("0"), disp("1"), disp("2")).foreach { r =>
+      // requests are failed
+      val e = intercept[Failure] { (Await.result(r, 2.seconds)) }
+
+      assert(e.getMessage == "fin")
+      assert(FailureFlags.isFlagged(FailureFlags.Retryable)(e))
+    }
+
+    // transport never sees write
+    verify(trans, never).write(any[String])
+    verify(trans, never).read()
+  }
 }

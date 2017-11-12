@@ -1,120 +1,134 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{Addr, WeightedSocketAddress}
-import com.twitter.util.{Event, Witness, Var, Timer, Duration}
-import java.net.SocketAddress
-import java.util.concurrent.atomic.AtomicInteger
+import com.twitter.finagle.serverset2.addr.ZkMetadata
+import com.twitter.finagle.{Addr, Address}
+import com.twitter.util._
+import java.net.InetSocketAddress
 
-private[serverset2] object Stabilizer {
-  // Create an event of epochs for the given duration.
-  def epochs(period: Duration)(implicit timer: Timer): Event[Unit] =
-    new Event[Unit] {
-      def register(w: Witness[Unit]) = {
-        timer.schedule(period) {
-          w.notify(())
-        }
-      }
-    }
-
-  private case class State(
-    limbo: Set[SocketAddress],
-    active: Set[SocketAddress],
-    addr: Addr)
-
-  private val emptyState = State(Set.empty, Set.empty, Addr.Pending)
+/**
+ * The Stabilizer attempts to dampen address changes for the observers so that the they
+ * are not affected by transient or flapping states from the external system which
+ * supplies the source addresses. It does so in two important ways:
+ *
+ * 1. Failure stabilization: In case of transient failures (flapping), we suppress failed resolution
+ * states when we have an existing good state until we get new information or sufficient time has
+ * passed. The previously known good state is returned indefinitely until a new update which puts
+ * the responsibility of managing stale data on the callers.
+ *
+ * 2. Update stabilization: In scenarios where the source is volatile or churning the
+ * underlying addresses, the stabilizer buffers (and batches) consecutive runs of
+ * bound addresses so that bursty changes to individual addresses are not propagated immediately.
+ */
+private object Stabilizer {
 
   /**
-   * Stabilize the address relative to the supplied source of epochs,
-   * such that any removed socket address in an Addr.Bound set is
-   * placed in a limbo state until at least one epoch has passed.
+   * The state object used to coalesce updates.
    *
-   * In practice, the source of epochs must correlate with a failure
-   * detection interval; we consider an address dead if it has not
-   * been observed for at least one epoch, and no failures
-   * (Addr.Failed) have been observed in the same interval.
+   * @param result represents the [[Addr]] which will be published to the event.
+   *
+   * @param buffer represents the buffer of [[Addr.Bound]] addresses
+   * which merges consecutive bound updates and eventually is flushed to `result`.
+   *
+   * @param last the most recently observed [[Addr.Bound]].
    */
-  def apply(va: Var[Addr], epoch: Event[Unit])
-  : Var[Addr] = Var.async(Addr.Pending: Addr) { u =>
-    // We construct an Event[State] representing states after
-    // successive address observations. The state contains two sets
-    // of addresses: the "active" set is the set of all observed
-    // addresses in the current epoch; the "limbo" set is active set
-    // at the turn of the last epoch.
-    //
-    // Whenever a failure is observed, the limbo set promoted by
-    // adding it to the active set; thus we can guarantee that set
-    // limbo++active contains all addresses seen in at least one
-    // epoch's period without intermittent failure.
-    //
-    // Our state also maintains the last observed value of `va`.
-    //
-    // Thus we interpret the stabilized address to be
-    // Addr.Bound(limbo++active) when these are nonempty; otherwise
-    // the last observed address.
+  private case class State(result: Addr, buffer: Addr.Bound, last: Addr.Bound)
 
-    val states: Event[State] = (va.changes select epoch).foldLeft(emptyState) {
-      // Addr update
-      case (st@State(limbo, active, last), Left(addr)) =>
-        addr match {
-          case Addr.Failed(_) =>
-            State(Set.empty, active++limbo, addr)
+  private val EmptyBound: Addr.Bound = Addr.Bound(Set(), Addr.Metadata.empty)
+  private val InitState = State(Addr.Pending, EmptyBound, EmptyBound)
 
-          case Addr.Bound(bound) =>
-            State(limbo, merge(active, bound), addr)
+  private def coalesce(addrOrEpoch: Event[Either[Addr, Unit]]): Event[Addr] = {
+    addrOrEpoch.foldLeft(InitState) {
+      // new addr bound – merge it with our buffer.
+      case (State(result, buffer, _), Left(newBound: Addr.Bound)) =>
+        // if `result` is non-bound flush `newBound` immediately (buffer has been reset already)
+        val newResult = result match {
+          case _: Addr.Bound => result
+          case _ => newBound
+        }
+        // We propagate the metadata from `newBound` and replace the
+        // addresses with the merged set.
+        val newBuffer = newBound.copy(addrs = merge(buffer.addrs, newBound.addrs))
+        State(newResult, newBuffer, newBound)
 
-          case addr =>
-            // Any other address simply propagates the address while
-            // leaving the active/limbo set unchanged. Both active
-            // and limbo have to expire in order for this address to
-            // propagate.
-            st.copy(addr=addr)
+      // non-bound address
+      case (state, Left(nonBound)) =>
+        (state.result, nonBound) match {
+          // failure/pending: propagate stale state if we have a previous bound.
+          case (_: Addr.Bound, Addr.Failed(_) | Addr.Pending) => state
+          // This guarantees that `result` is never set to an [[Addr.Failed]].
+          case (_, Addr.Failed(_)) => state.copy(result = Addr.Neg)
+          case (_, Addr.Pending) => state.copy(result = Addr.Pending)
+          // All other non-bound state gets propagated immediately. The state is also reset here.
+          case (_, _) => State(nonBound, EmptyBound, EmptyBound)
         }
 
-      // The epoch turned
-      case (st@State(limbo, active, last), Right(())) =>
-        last match {
-          case Addr.Bound(bound) =>
-            State(active, bound, last)
-
-          case Addr.Neg =>
-            State(active, Set.empty, Addr.Neg)
-
-          case Addr.Pending | Addr.Failed(_) =>
-            // If the last address is nonbound, we ignore it and
-            // maintain our state; we cannot demote the active set
-            // when nonbound, since that would eventually promote
-            // the address
-            st
-        }
+      // epoch turned – promote buffer.
+      case (State(_: Addr.Bound, buffer, last), Right(())) => State(buffer, last, last)
+      case (state, Right(())) => state
+    }.map {
+      case State(result, _, _) => result
     }
-
-    val addrs = states map { case State(limbo, active, last) =>
-      val all = merge(limbo, active)
-      if (all.nonEmpty) Addr.Bound(all)
-      else last
-    } sliding(2) collect {
-      // Quench duplicate updates
-      case Seq(a) => a
-      case Seq(fst, snd) if fst != snd => snd
-    }
-
-    addrs.register(Witness(u))
   }
 
   /**
-   * Merge WeightedSocketAddresses with same underlying SocketAddress
-   * preferring weights from `next` over `prev`.
+   * Merge `next` with `prev` taking into account shard ids and weights, preferring
+   * `next` over `prev` when encountering duplicates. If shardIds are present eliminate
+   * duplicates using that, otherwise eliminate duplicates based on raw addresses. ShardId
+   * based de-duping is extremely important for observers working against partitioned clusters.
    */
-  private def merge(prev: Set[SocketAddress], next: Set[SocketAddress]): Set[SocketAddress] = {
-    val nextStripped = next map {
-      case WeightedSocketAddress(sa, w) => sa
+  private def merge(prev: Set[Address], next: Set[Address]): Set[Address] = {
+    var shards: Set[Int] = Set.empty
+    var inets: Set[InetSocketAddress] = Set.empty
+
+    // populate `shards` and `inets` with the data from `next`
+    val nextIter = next.iterator
+    while (nextIter.hasNext) {
+      nextIter.next() match {
+        case Address.Inet(inet, md) =>
+          inets = inets + inet
+          ZkMetadata.fromAddrMetadata(md) match {
+            case Some(ZkMetadata(Some(shardId))) =>
+              shards = shards + shardId
+            case _ => // nop
+          }
+        case _ => // nop
+      }
     }
 
-    val legacy = prev filter {
-      case WeightedSocketAddress(sa, w) => !nextStripped.contains(sa)
+    // the subset of `prev` to merge with `next`
+    val filteredPrev: Set[Address] = prev.filter {
+      case Address.Inet(inet, md) =>
+        ZkMetadata.fromAddrMetadata(md) match {
+          case Some(ZkMetadata(Some(shardId))) => !shards.contains(shardId)
+          case _ => !inets.contains(inet)
+        }
+      case _ => true
     }
 
-    legacy ++ next
+    filteredPrev ++ next
+  }
+
+  def apply(va: Var[Addr], epoch: Epoch): Var[Addr] = {
+    Var.async[Addr](Addr.Pending) { updatableAddr =>
+      val addrOrEpoch: Event[Either[Addr, Unit]] =
+        if (epoch.period != Duration.Zero) {
+          va.changes.select(epoch.event)
+        } else {
+          // This is a special case for integration testing, we want to
+          // prevent the update dampening behavior by triggering
+          // epochs manually.
+          new Event[Either[Addr, Unit]] {
+            def register(s: Witness[Either[Addr, Unit]]): Closable = {
+              va.changes.respond { addr =>
+                s.notify(Left(addr))
+                s.notify(Right(()))
+                s.notify(Right(()))
+              }
+            }
+          }
+        }
+
+      coalesce(addrOrEpoch).register(Witness(updatableAddr))
+    }
   }
 }

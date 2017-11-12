@@ -71,37 +71,37 @@ class AlarmTest extends FunSuite with LocalConductors {
     }
   }
 
-  test("DurationAlarm should sleep until it's over") {
-    val conductor = new Conductor
-    import conductor._
+  if (!sys.props.contains("SKIP_FLAKY"))
+    test("DurationAlarm should sleep until it's over") {
+      val conductor = new Conductor
+      import conductor._
 
-    @volatile var ctr = 0
+      @volatile var ctr = 0
 
-    Time.withCurrentTimeFrozen { ctl =>
+      Time.withCurrentTimeFrozen { ctl =>
+        localThread(conductor) {
+          Alarm.armAndExecute({ () =>
+            new DurationAlarm(5.seconds)
+          }, { () =>
+            ctr += 1
+          })
+        }
 
-      localThread(conductor) {
-        Alarm.armAndExecute({ () =>
-          new DurationAlarm(5.seconds)
-        }, { () =>
-          ctr += 1
-        })
+        localThread(conductor) {
+          waitForBeat(1)
+          assert(ctr == 1)
+          ctl.advance(2.seconds)
+
+          waitForBeat(2)
+          assert(ctr == 1)
+          ctl.advance(3.seconds)
+        }
       }
 
-      localThread(conductor) {
-        waitForBeat(1)
-        assert(ctr === 1)
-        ctl.advance(2.seconds)
-
-        waitForBeat(2)
-        assert(ctr === 1)
-        ctl.advance(3.seconds)
+      localWhenFinished(conductor) {
+        assert(ctr == 2)
       }
     }
-
-    localWhenFinished(conductor) {
-      assert(ctr === 2)
-    }
-  }
 
   trait GenerationAlarmHelper {
     val fakePool = new FakeMemoryPool(new FakeMemoryUsage(StorageUnit.zero, 10.megabytes))
@@ -111,14 +111,13 @@ class AlarmTest extends FunSuite with LocalConductors {
   }
 
   test("GenerationAlarm should sleep until the next alarm") {
-    val h = new GenerationAlarmHelper{}
+    val h = new GenerationAlarmHelper {}
     import h._
 
     val conductor = new Conductor
     import conductor._
 
     Time.withCurrentTimeFrozen { ctl =>
-
       localThread(conductor) {
         Alarm.arm({ () =>
           new GenerationAlarm(ctr) min new IntervalAlarm(1.second)
@@ -165,7 +164,7 @@ class AlarmTest extends FunSuite with LocalConductors {
   }
 
   test("BytesAlarm should finish when we have enough bytes") {
-    val h = new GenerationAlarmHelper{}
+    val h = new GenerationAlarmHelper {}
     import h._
 
     val conductor = new Conductor
@@ -195,33 +194,33 @@ class AlarmTest extends FunSuite with LocalConductors {
   }
 
   test("BytesAlarm should use 80% of the target") {
-    val h = new GenerationAlarmHelper{}
+    val h = new GenerationAlarmHelper {}
     import h._
     val ctr = FakeByteCounter(50.kilobytes.inBytes, Time.now, nfo)
     val alarm = new BytesAlarm(ctr, () => 5.megabytes)
-    // 5MB / (50 KB/ms) * 8 / 10 === 80.milliseconds
+    // 5MB / (50 KB/ms) * 8 / 10 == 80.milliseconds
     // 80.milliseconds < 100.milliseconds
-    assert(alarm.sleeptime === ((80 * 1.kilobyte.inBytes / 1000).milliseconds))
+    assert(alarm.sleeptime == ((80 * 1.kilobyte.inBytes / 1000).milliseconds))
   }
 
   test("BytesAlarm should use the default if the gap is too big") {
-    val h = new GenerationAlarmHelper{}
+    val h = new GenerationAlarmHelper {}
     import h._
     val ctr = FakeByteCounter(1000, Time.now, nfo)
     val alarm = new BytesAlarm(ctr, () => 5.megabytes)
-    // 5MB / 1000000B/S * 8 / 10 === 4.seconds
+    // 5MB / 1000000B/S * 8 / 10 == 4.seconds
     // 4.seconds > 100.milliseconds
-    assert(alarm.sleeptime === 100.milliseconds)
+    assert(alarm.sleeptime == 100.milliseconds)
   }
 
   test("BytesAlarm should use zero if we're past") {
-    val h = new GenerationAlarmHelper{}
+    val h = new GenerationAlarmHelper {}
     import h._
     val ctr = FakeByteCounter(1000, Time.now, nfo)
     val alarm = new BytesAlarm(ctr, () => 5.megabytes)
     fakePool.setSnapshot(new FakeMemoryUsage(6.megabytes, 10.megabytes))
-    // -1MB / 1000000B/S * 8 / 10 === -800.milliseconds
+    // -1MB / 1000000B/S * 8 / 10 == -800.milliseconds
     // -800.milliseconds < 10.milliseconds
-    assert(alarm.sleeptime === 10.milliseconds)
+    assert(alarm.sleeptime == 10.milliseconds)
   }
 }

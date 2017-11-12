@@ -1,134 +1,165 @@
 package com.twitter.finagle.memcached.protocol.text
 
 import com.twitter.finagle.memcached.protocol._
-import org.jboss.netty.handler.codec.oneone.OneToOneEncoder
-import org.jboss.netty.buffer.{ChannelBuffer, ChannelBuffers}
-import com.twitter.finagle.memcached.util.ChannelBufferUtils._
-import org.jboss.netty.channel._
+import com.twitter.io.{Buf, BufByteWriter}
+import java.nio.charset.StandardCharsets
 
-class ResponseToEncoding extends OneToOneEncoder {
-  private[this] val ZERO          = "0"
-  private[this] val VALUE         = "VALUE"
-
-  private[this] val STORED        = "STORED"
-  private[this] val NOT_STORED    = "NOT_STORED"
-  private[this] val EXISTS        = "EXISTS"
-  private[this] val NOT_FOUND     = "NOT_FOUND"
-  private[this] val DELETED       = "DELETED"
-
-  def encode(ctx: ChannelHandlerContext, ch: Channel, message: AnyRef): Decoding = message match {
-    case Stored()       => Tokens(Seq(STORED))
-    case NotStored()    => Tokens(Seq(NOT_STORED))
-    case Exists()       => Tokens(Seq(EXISTS))
-    case Deleted()      => Tokens(Seq(DELETED))
-    case NotFound()     => Tokens(Seq(NOT_FOUND))
-    case NoOp()         => Tokens(Nil)
-    case Number(value)  => Tokens(Seq(value.toString))
-    case Error(cause)   =>
-      val formatted = ExceptionHandler.format(cause)
-      Tokens(formatted.map { ChannelBuffers.copiedBuffer(_) })
-    case InfoLines(lines) =>
-      val buffer = ChannelBuffers.dynamicBuffer(100 * lines.size)
-      val statLines = lines map { line =>
-        val key = line.key
-        val values = line.values
-        Tokens(Seq(key) ++ values)
-      }
-      StatLines(statLines)
-    case Values(values) =>
-      val buffer = ChannelBuffers.dynamicBuffer(100 * values.size)
-      val tokensWithData = values map {
-        case Value(key, value, casUnique, Some(flags)) =>
-          TokensWithData(Seq(VALUE, key, flags), value, casUnique)
-        case Value(key, value, casUnique, None) =>
-          TokensWithData(Seq(VALUE, key, ZERO), value, casUnique)
-      }
-      ValueLines(tokensWithData)
-  }
+private object Encoder {
+  val SPACE = " ".getBytes(StandardCharsets.UTF_8)
+  val DELIMITER = "\r\n".getBytes(StandardCharsets.UTF_8)
+  val END = "END".getBytes(StandardCharsets.UTF_8)
 }
 
-class CommandToEncoding extends OneToOneEncoder {
-  private[this] val GET           = "get"
-  private[this] val GETS          = "gets"
-  private[this] val DELETE        = "delete"
-  private[this] val INCR          = "incr"
-  private[this] val DECR          = "decr"
+/**
+ * Class that can encode `Command`-type objects into `Buf`s. Used on the client side.
+ */
+private[finagle] abstract class AbstractCommandToBuf[Cmd] extends MessageEncoder[Cmd] {
+  import Encoder._
 
-  private[this] val ADD           = "add"
-  private[this] val SET           = "set"
-  private[this] val APPEND        = "append"
-  private[this] val PREPEND       = "prepend"
-  private[this] val REPLACE       = "replace"
-  private[this] val CAS           = "cas"
+  protected final def encodeCommandWithData(
+    command: Buf,
+    key: Buf,
+    flags: Buf,
+    expiry: Buf,
+    data: Buf,
+    casUnique: Option[Buf] = None
+  ): Buf = {
 
-  private[this] val GETV          = "getv"
-  private[this] val UPSERT        = "upsert"
+    val lengthString = Integer.toString(data.length)
 
-  private[this] val QUIT          = "quit"
-  private[this] val STATS         = "stats"
+    val messageSize = {
+      val casLength = casUnique match {
+        case Some(token) => 1 + token.length // SPACE + token
+        case None => 0
+      }
 
-  def encode(ctx: ChannelHandlerContext, ch: Channel, message: AnyRef): Decoding = message match {
+      // the '+ 1' accounts for the space separator
+      command.length + 1 +
+        key.length + 1 +
+        flags.length + 1 +
+        expiry.length + 1 +
+        lengthString.length + // trailing space accounted for in casLength, if it's necessary
+        casLength + 2 + // CAS + '\r\n'
+        data.length + 2 // data + '\r\n'
+    }
+
+    val bw = BufByteWriter.fixed(messageSize)
+
+    bw.writeBytes(command)
+    bw.writeBytes(SPACE)
+
+    bw.writeBytes(key)
+    bw.writeBytes(SPACE)
+
+    bw.writeBytes(flags)
+    bw.writeBytes(SPACE)
+
+    bw.writeBytes(expiry)
+    bw.writeBytes(SPACE)
+
+    bw.writeString(lengthString, StandardCharsets.US_ASCII)
+
+    casUnique match {
+      case Some(token) =>
+        bw.writeBytes(SPACE)
+        bw.writeBytes(token)
+      case None => ()
+    }
+
+    bw.writeBytes(DELIMITER)
+    bw.writeBytes(data)
+    bw.writeBytes(DELIMITER)
+
+    bw.owned()
+  }
+
+  protected final def encodeCommand(command: Seq[Buf]): Buf = {
+    // estimated size + 2 for DELIMITER
+    val bw = BufByteWriter.dynamic(10 * command.size + 2)
+    command.foreach { token =>
+      bw.writeBytes(token)
+      bw.writeBytes(SPACE)
+    }
+    bw.writeBytes(DELIMITER)
+    bw.owned()
+  }
+
+  def encode(message: Cmd): Buf
+}
+
+/**
+ * Used by the client.
+ */
+private[finagle] class CommandToBuf extends AbstractCommandToBuf[Command] {
+
+  private[this] val GET = Buf.Utf8("get")
+  private[this] val GETS = Buf.Utf8("gets")
+  private[this] val DELETE = Buf.Utf8("delete")
+  private[this] val INCR = Buf.Utf8("incr")
+  private[this] val DECR = Buf.Utf8("decr")
+
+  private[this] val ADD = Buf.Utf8("add")
+  private[this] val SET = Buf.Utf8("set")
+  private[this] val APPEND = Buf.Utf8("append")
+  private[this] val PREPEND = Buf.Utf8("prepend")
+  private[this] val REPLACE = Buf.Utf8("replace")
+  private[this] val CAS = Buf.Utf8("cas")
+
+  private[this] val GETV = Buf.Utf8("getv")
+  private[this] val UPSERT = Buf.Utf8("upsert")
+
+  private[this] val QUIT = Buf.Utf8("quit")
+  private[this] val STATS = Buf.Utf8("stats")
+
+  private[this] val ZeroBuf = Buf.Utf8("0")
+
+  private[this] def intToUtf8(i: Int): Buf =
+    if (i == 0) ZeroBuf else Buf.Utf8(i.toString)
+
+  def encode(message: Command): Buf = message match {
     case Add(key, flags, expiry, value) =>
-      TokensWithData(Seq(ADD, key, flags.toString, expiry.inSeconds.toString), value)
+      encodeCommandWithData(ADD, key, intToUtf8(flags), intToUtf8(expiry.inSeconds), value)
     case Set(key, flags, expiry, value) =>
-      TokensWithData(Seq(SET, key, flags.toString, expiry.inSeconds.toString), value)
+      encodeCommandWithData(SET, key, intToUtf8(flags), intToUtf8(expiry.inSeconds), value)
     case Replace(key, flags, expiry, value) =>
-      TokensWithData(Seq(REPLACE, key, flags.toString, expiry.inSeconds.toString), value)
+      encodeCommandWithData(REPLACE, key, intToUtf8(flags), intToUtf8(expiry.inSeconds), value)
     case Append(key, flags, expiry, value) =>
-      TokensWithData(Seq(APPEND, key, flags.toString, expiry.inSeconds.toString), value)
+      encodeCommandWithData(APPEND, key, intToUtf8(flags), intToUtf8(expiry.inSeconds), value)
     case Prepend(key, flags, expiry, value) =>
-      TokensWithData(Seq(PREPEND, key, flags.toString, expiry.inSeconds.toString), value)
+      encodeCommandWithData(PREPEND, key, intToUtf8(flags), intToUtf8(expiry.inSeconds), value)
     case Cas(key, flags, expiry, value, casUnique) =>
-      TokensWithData(Seq(CAS, key, flags.toString, expiry.inSeconds.toString), value, Some(casUnique))
-    case Get(keys) =>
-      Tokens(Seq[ChannelBuffer](GET) ++ keys)
-    case Gets(keys) =>
-      Tokens(Seq[ChannelBuffer](GETS) ++ keys)
-    case Getv(keys) =>
-      Tokens(Seq[ChannelBuffer](GETV) ++ keys)
+      encodeCommandWithData(
+        CAS,
+        key,
+        intToUtf8(flags),
+        intToUtf8(expiry.inSeconds),
+        value,
+        Some(casUnique)
+      )
     case Upsert(key, flags, expiry, value, version) =>
-      TokensWithData(Seq(UPSERT, key, flags.toString, expiry.inSeconds.toString), value, Some(version))
+      encodeCommandWithData(
+        UPSERT,
+        key,
+        intToUtf8(flags),
+        intToUtf8(expiry.inSeconds),
+        value,
+        Some(version)
+      )
+    case Get(keys) =>
+      encodeCommand(GET +: keys)
+    case Gets(keys) =>
+      encodeCommand(GETS +: keys)
+    case Getv(keys) =>
+      encodeCommand(GETV +: keys)
     case Incr(key, amount) =>
-      Tokens(Seq(INCR, key, amount.toString))
+      encodeCommand(Seq(INCR, key, Buf.Utf8(amount.toString)))
     case Decr(key, amount) =>
-      Tokens(Seq(DECR, key, amount.toString))
+      encodeCommand(Seq(DECR, key, Buf.Utf8(amount.toString)))
     case Delete(key) =>
-      Tokens(Seq(DELETE, key))
-    case Stats(args) => Tokens(Seq[ChannelBuffer](STATS) ++ args)
+      encodeCommand(Seq(DELETE, key))
+    case Stats(args) =>
+      encodeCommand(STATS +: args)
     case Quit() =>
-      Tokens(Seq(QUIT))
-  }
-}
-
-class ExceptionHandler extends SimpleChannelUpstreamHandler {
-  override def exceptionCaught(ctx: ChannelHandlerContext, e: ExceptionEvent) = {
-    val formatted = ExceptionHandler.formatWithEol(e.getCause)
-    Channels.write(ctx.getChannel, ChannelBuffers.copiedBuffer(formatted:_*))
-  }
-}
-
-object ExceptionHandler {
-  private val DELIMITER     = "\r\n".getBytes
-  private val ERROR         = "ERROR".getBytes
-  private val CLIENT_ERROR  = "CLIENT_ERROR".getBytes
-  private val SERVER_ERROR  = "SERVER_ERROR".getBytes
-  private val SPACE         = " ".getBytes
-  private val Newlines      = "[\\r\\n]".r
-
-  def formatWithEol(e: Throwable) = format(e) match {
-    case head :: Nil => Seq(head, DELIMITER)
-    case head :: tail :: Nil => Seq(head, SPACE, tail, DELIMITER)
-    case _ => throw e
-  }
-
-  def format(e: Throwable) = e match {
-    case e: NonexistentCommand =>
-      Seq(ERROR)
-    case e: ClientError        =>
-      Seq(CLIENT_ERROR, Newlines.replaceAllIn(e.getMessage, " ").getBytes)
-    case e: ServerError        =>
-      Seq(SERVER_ERROR, Newlines.replaceAllIn(e.getMessage, " ").getBytes)
-    case t                     =>
-      throw t
+      encodeCommand(Seq(QUIT))
   }
 }

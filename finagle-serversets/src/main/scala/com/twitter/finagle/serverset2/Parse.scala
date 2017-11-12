@@ -1,8 +1,8 @@
 package com.twitter.finagle.serverset2
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.twitter.util.NonFatal
 import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
 
 private[serverset2] object IntObj {
   def unapply(o: Object): Option[Int] = o match {
@@ -28,7 +28,7 @@ private[serverset2] object StringObj {
 private[serverset2] object SeqObj {
   def unapply(o: Object): Option[Seq[Object]] = o match {
     case l: java.util.List[_] => Some(l.asScala.toSeq.asInstanceOf[Seq[Object]])
-    case _=> None
+    case _ => None
   }
 }
 
@@ -45,10 +45,12 @@ private[serverset2] object JsonDict {
   private[this] val m = new ObjectMapper
 
   def apply(json: String): (Object => Option[Object]) = {
-    val o = try m.readValue(json, classOf[java.util.Map[Object, Object]]) catch {
+    val o = try m.readValue(json, classOf[java.util.Map[Object, Object]])
+    catch {
       case NonFatal(_) => return Function.const(None)
     }
 
-    key => Option(o.get(key))
+    key =>
+      Option(o.get(key))
   }
 }

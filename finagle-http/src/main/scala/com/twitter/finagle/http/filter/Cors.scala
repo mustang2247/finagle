@@ -1,12 +1,12 @@
 package com.twitter.finagle.http.filter
 
 import com.twitter.finagle.{Filter, Service}
-import com.twitter.finagle.http.{Request, Response, Status}
+import com.twitter.finagle.http.{Request, Response, Method}
 import com.twitter.util.{Duration, Future}
-import org.jboss.netty.handler.codec.http.HttpMethod
 
 /** Implements http://www.w3.org/TR/cors/ */
 object Cors {
+
   /**
    * A Cross-Origin Resource Sharing policy.
    *
@@ -28,7 +28,7 @@ object Cors {
    * response header (in response to non-preflight requests).
    *
    * If supportsCredentials is true and allowsOrigin does not return '*', the Access-Control-
-   * Allow-Credentials resopnse header will be set to 'true'.
+   * Allow-Credentials response header will be set to 'true'.
    *
    * If maxAge is defined, its value (in seconds) will be set in the Access-Control-Max-Age
    * response header.
@@ -37,23 +37,25 @@ object Cors {
     allowsOrigin: String => Option[String],
     allowsMethods: String => Option[Seq[String]],
     allowsHeaders: Seq[String] => Option[Seq[String]],
-    exposedHeaders: Seq[String] = Seq.empty,
+    exposedHeaders: Seq[String] = Nil,
     supportsCredentials: Boolean = false,
-    maxAge: Option[Duration] = None)
+    maxAge: Option[Duration] = None
+  )
 
   /** A CORS policy that lets you do whatever you want.  Don't use this in production. */
-  val UnsafePermissivePolicy: Policy = Policy(
-    allowsOrigin  = { origin  => Some(origin) },
-    allowsMethods = { method  => Some(method :: Nil) },
-    allowsHeaders = { headers => Some(headers) },
-    supportsCredentials = true)
+  val UnsafePermissivePolicy: Policy = Policy(allowsOrigin = { origin =>
+    Some(origin)
+  }, allowsMethods = { method =>
+    Some(method :: Nil)
+  }, allowsHeaders = { headers =>
+    Some(headers)
+  }, supportsCredentials = true)
 
   /**
    * An HTTP filter that handles preflight (OPTIONS) requests and sets CORS response headers
    * as described in the W3C CORS spec.
    */
-  class HttpFilter(policy: Policy)
-      extends Filter[Request, Response, Request, Response] {
+  class HttpFilter(policy: Policy) extends Filter[Request, Response, Request, Response] {
 
     /*
      * Simple Cross-Origin Request, Actual Request, and Redirects
@@ -64,7 +66,7 @@ object Cors {
        * If the Origin header is not present terminate this set of steps. The request is outside
        * the scope of this specification.
        */
-      Option(request.headers.get("Origin")) flatMap { origin =>
+      request.headerMap.get("Origin").flatMap { origin =>
         /*
          * If the value of the Origin header is not a case-sensitive match for any of the values
          * in list of origins, do not set any additional headers and terminate this set of steps.
@@ -85,9 +87,9 @@ object Cors {
      * n.b. The string "*" cannot be used for a resource that supports credentials.
      */
     protected[this] def setOriginAndCredentials(response: Response, origin: String): Response = {
-      response.headers.add("Access-Control-Allow-Origin", origin)
+      response.headerMap.add("Access-Control-Allow-Origin", origin)
       if (policy.supportsCredentials && origin != "*") {
-        response.headers.add("Access-Control-Allow-Credentials", "true")
+        response.headerMap.add("Access-Control-Allow-Credentials", "true")
       }
       response
     }
@@ -101,7 +103,7 @@ object Cors {
      * origins.
      */
     def setVary(response: Response): Response = {
-      response.headers.set("Vary", "Origin")
+      response.headerMap.set("Vary", "Origin")
       response
     }
 
@@ -116,8 +118,8 @@ object Cors {
      */
     protected[this] def addExposedHeaders(response: Response): Response = {
       if (policy.exposedHeaders.nonEmpty) {
-        response.headers.add(
-          "Access-Control-Expose-Headers", policy.exposedHeaders.mkString(", "))
+        response.headerMap
+          .add("Access-Control-Expose-Headers", policy.exposedHeaders.mkString(", "))
       }
       response
     }
@@ -136,12 +138,12 @@ object Cors {
 
     protected[this] object Preflight {
       def unapply(request: Request): Boolean =
-        request.method == HttpMethod.OPTIONS
+        request.method == Method.Options
     }
 
     /** Let method be the value as result of parsing the Access-Control-Request-Method header. */
     protected[this] def getMethod(request: Request): Option[String] =
-      Option(request.headers.get("Access-Control-Request-Method"))
+      request.headerMap.get("Access-Control-Request-Method")
 
     /**
      * If method is a simple method this step may be skipped.
@@ -150,7 +152,7 @@ object Cors {
      * methods.
      */
     protected[this] def setMethod(response: Response, methods: Seq[String]): Response = {
-      response.headers.set("Access-Control-Allow-Methods", methods.mkString(", "))
+      response.headerMap.set("Access-Control-Allow-Methods", methods.mkString(", "))
       response
     }
 
@@ -160,7 +162,7 @@ object Cors {
      */
     protected[this] def setMaxAge(response: Response): Response = {
       policy.maxAge foreach { maxAge =>
-        response.headers.add("Access-Control-Max-Age", maxAge.inSeconds.toString)
+        response.headerMap.set("Access-Control-Max-Age", maxAge.inSeconds.toString)
       }
       response
     }
@@ -173,9 +175,10 @@ object Cors {
      * headers let header field-names be the empty list.
      */
     protected[this] def getHeaders(request: Request): Seq[String] =
-      Option(request.headers.get("Access-Control-Request-Headers")) map {
-        commaSpace.split(_).toSeq
-      } getOrElse List.empty[String]
+      request.headerMap.get("Access-Control-Request-Headers") match {
+        case Some(value) => commaSpace.split(value).toSeq
+        case None => Seq.empty
+      }
 
     /**
      * If each of the header field-names is a simple header and none is Content-Type, than this step
@@ -186,7 +189,7 @@ object Cors {
      */
     protected[this] def setHeaders(response: Response, headers: Seq[String]): Response = {
       if (headers.nonEmpty) {
-        response.headers.set("Access-Control-Allow-Headers", headers.mkString(", "))
+        response.headerMap.set("Access-Control-Allow-Headers", headers.mkString(", "))
       }
       response
     }
@@ -200,10 +203,11 @@ object Cors {
             policy.allowsHeaders(headers) map { allowedHeaders =>
               setHeaders(
                 setMethod(
-                  setMaxAge(
-                    setOriginAndCredentials(request.response, origin)),
-                  allowedMethods),
-                allowedHeaders)
+                  setMaxAge(setOriginAndCredentials(request.response, origin)),
+                  allowedMethods
+                ),
+                allowedHeaders
+              )
             }
           }
         }
@@ -218,10 +222,11 @@ object Cors {
      */
     def apply(request: Request, service: Service[Request, Response]): Future[Response] = {
       val response = request match {
-        case Preflight() => Future {
-          // If preflight is not acceptable, just return a 200 without CORS headers
-          handlePreflight(request) getOrElse request.response
-        }
+        case Preflight() =>
+          Future {
+            // If preflight is not acceptable, just return a 200 without CORS headers
+            handlePreflight(request) getOrElse request.response
+          }
         case _ => service(request) map { handleSimple(request, _) }
       }
       response map { setVary(_) }
@@ -237,17 +242,21 @@ object Cors {
 object CorsFilter {
   private[this] val sep = ", *".r
 
-  def apply(origin:  String = "*",
-            methods: String = "GET",
-            headers: String = "x-requested-with",
-            exposes: String = ""): Filter[Request, Response, Request, Response] = {
+  def apply(
+    origin: String = "*",
+    methods: String = "GET",
+    headers: String = "x-requested-with",
+    exposes: String = ""
+  ): Filter[Request, Response, Request, Response] = {
     val methodList = Some(sep.split(methods).toSeq)
     val headerList = Some(sep.split(headers).toSeq)
     val exposeList = sep.split(exposes).toSeq
-    new Cors.HttpFilter(Cors.Policy(
-      { _ => Some(origin) },
-      { _ => methodList },
-      { _ => headerList },
-      exposeList))
+    new Cors.HttpFilter(Cors.Policy({ _ =>
+      Some(origin)
+    }, { _ =>
+      methodList
+    }, { _ =>
+      headerList
+    }, exposeList))
   }
 }

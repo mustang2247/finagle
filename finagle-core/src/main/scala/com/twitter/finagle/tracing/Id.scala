@@ -3,31 +3,18 @@ package com.twitter.finagle.tracing
 import com.twitter.finagle.util.ByteArrays
 import com.twitter.util.RichU64String
 import com.twitter.util.{Try, Return, Throw}
+import java.lang.{Boolean => JBool}
+import scala.util.control.NonFatal
 
 /**
  * Defines trace identifiers.  Span IDs name a particular (unique)
  * span, while TraceIds contain a span ID as well as context (parentId
  * and traceId).
  */
-
 final class SpanId(val self: Long) extends Proxy {
-  import SpanId.byteToStr
-
   def toLong = self
 
-  // This is invoked a lot, so they need to be fast.
-  override def toString: String = {
-    val b = new StringBuilder(16)
-    b.appendAll(byteToStr((self>>56 & 0xff).toByte))
-    b.appendAll(byteToStr((self>>48 & 0xff).toByte))
-    b.appendAll(byteToStr((self>>40 & 0xff).toByte))
-    b.appendAll(byteToStr((self>>32 & 0xff).toByte))
-    b.appendAll(byteToStr((self>>24 & 0xff).toByte))
-    b.appendAll(byteToStr((self>>16 & 0xff).toByte))
-    b.appendAll(byteToStr((self>>8 & 0xff).toByte))
-    b.appendAll(byteToStr((self & 0xff).toByte))
-    b.toString
-  }
+  override def toString: String = SpanId.toString(self)
 }
 
 object SpanId {
@@ -41,18 +28,38 @@ object SpanId {
     }
   ).toArray
 
-  private def byteToStr(b: Byte) = lut(b+128)
+  private def byteToChars(b: Byte): Array[Char] = lut(b + 128)
 
-  def apply(spanId: Long) = new SpanId(spanId)
+  // This is invoked a lot, so they need to be fast.
+  def toString(l: Long): String = {
+    val b = new StringBuilder(16)
+    b.appendAll(byteToChars((l >> 56 & 0xff).toByte))
+    b.appendAll(byteToChars((l >> 48 & 0xff).toByte))
+    b.appendAll(byteToChars((l >> 40 & 0xff).toByte))
+    b.appendAll(byteToChars((l >> 32 & 0xff).toByte))
+    b.appendAll(byteToChars((l >> 24 & 0xff).toByte))
+    b.appendAll(byteToChars((l >> 16 & 0xff).toByte))
+    b.appendAll(byteToChars((l >> 8 & 0xff).toByte))
+    b.appendAll(byteToChars((l & 0xff).toByte))
+    b.toString
+  }
+
+  def apply(spanId: Long): SpanId = new SpanId(spanId)
+
   def fromString(spanId: String): Option[SpanId] =
     try {
-      Some(this(new RichU64String(spanId).toU64Long))
+      // Tolerates 128 bit X-B3-TraceId by reading the right-most 16 hex
+      // characters (as opposed to overflowing a U64 and starting a new trace).
+      val length = spanId.length()
+      val lower64Bits = if (length <= 16) spanId else spanId.substring(length - 16)
+      Some(SpanId(new RichU64String(lower64Bits).toU64Long))
     } catch {
-      case _: Throwable => None
+      case NonFatal(_) => None
     }
 }
 
 object TraceId {
+
   /**
    * Creates a TraceId with no flags set. See case class for more info.
    */
@@ -107,7 +114,8 @@ object TraceId {
         if (parent64 == span64) None else Some(SpanId(parent64)),
         SpanId(span64),
         sampled,
-        flags)
+        flags
+      )
       Return(traceId)
     }
   }
@@ -115,6 +123,37 @@ object TraceId {
 
 /**
  * A trace id represents one particular trace for one request.
+ *
+ * A request is composed of one or more spans, which are generally RPCs but
+ * may be other in-process activity. The TraceId for each span is a tuple of
+ * three ids:
+ *
+ *   1. a shared id common to all spans in an overall request (trace id)
+ *   2. an id unique to this part of the request (span id)
+ *   3. an id for the parent request that caused this span (parent id)
+ *
+ * For example, when service M calls service N, they may have respective
+ * TraceIds like these:
+ *
+ * {{{
+ *            TRACE ID         SPAN ID           PARENT ID
+ * SERVICE M  e4bbb7c0f6a2ff07.a5f47e9fced314a2<:694eb2f05b8fd7d1
+ *                   |                |
+ *                   |                +-----------------+
+ *                   |                                  |
+ *                   v                                  v
+ * SERVICE N  e4bbb7c0f6a2ff07.263edc9b65773b08<:a5f47e9fced314a2
+ * }}}
+ *
+ * Parent id and trace id are optional when constructing a TraceId because
+ * they are not present for the very first span in a request. In this case all
+ * three ids in the resulting TraceId are the same:
+ *
+ * {{{
+ *            TRACE ID         SPAN ID           PARENT ID
+ * SERVICE A  34429b04b6bbf478.34429b04b6bbf478<:34429b04b6bbf478
+ * }}}
+ *
  * @param _traceId The id for this request.
  * @param _parentId The id for the request one step up the service stack.
  * @param spanId The id for this particular request
@@ -128,12 +167,33 @@ final case class TraceId(
   _parentId: Option[SpanId],
   spanId: SpanId,
   _sampled: Option[Boolean],
-  flags: Flags)
-{
-  def traceId = _traceId getOrElse parentId
-  def parentId = _parentId getOrElse spanId
-  // debug flag overrides sampled to be true
-  lazy val sampled = if (flags.isDebug) Some(true) else _sampled
+  flags: Flags
+) {
+  def traceId: SpanId = _traceId match {
+    case None => parentId
+    case Some(id) => id
+  }
+
+  def parentId: SpanId = _parentId match {
+    case None => spanId
+    case Some(id) => id
+  }
+
+  /**
+   * Override [[_sampled]] to Some(true) if the debug flag is set.
+   * @see [[getSampled]] for a Java-friendly API.
+   */
+  lazy val sampled: Option[Boolean] = if (flags.isDebug) Some(true) else _sampled
+
+  /**
+   * Java-friendly API to convert [[sampled]] to a [[Option]] of [[java.lang.Boolean]].
+   * @since Java generics require objects, using [[sampled]] from
+   *        Java would give an Option<Object> instead of Option<Boolean>
+   */
+  def getSampled(): Option[JBool] = sampled match {
+    case Some(b) => Some(Boolean.box(b))
+    case None => None
+  }
 
   private[TraceId] def ids = (traceId, parentId, spanId)
 
@@ -145,6 +205,5 @@ final case class TraceId(
   override def hashCode(): Int =
     ids.hashCode()
 
-  override def toString =
-    "%s.%s<:%s".format(traceId, spanId, parentId)
+  override def toString = s"$traceId.$spanId<:$parentId"
 }
